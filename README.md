@@ -18,12 +18,12 @@ The `tableID` parameter specifies the ID of the table to retrieve data from. The
 4. Once the DataFrame has been retrieved, you can use it for further analysis or exporting the data to a file.
 
 ## Example Usage
-Here is an example of how to retrieve the entire dataset from table ID "1007" and apply a filter:
+Here is an example of how to retrieve the entire dataset from table ID "84916NED" and apply a filter:
 ```python
 df = DataFrame("84916NED", limit=5)
 print(df)
 ```
-This will retrieve the first 5 rows of the dataset from table ID "1007" where `AantalPersonen` is equal to 1.
+This will retrieve the first 5 rows of the dataset from table ID "84916NED".
 
 ## License
 This project is licensed under the MIT License - see the [LICENSE](https://github.com/[USERNAME]/[REPO_NAME]/blob/master/LICENSE) file for details.
