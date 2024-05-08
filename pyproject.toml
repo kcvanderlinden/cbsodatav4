@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "cbs-odatav4_kcvanderlinden"
+name = "cbsodatav4_kcvanderlinden"
 version = "0.0.1"
 authors = [
   { name="Karel van der Linden", email="kcvanderlinden@outlook.com" },

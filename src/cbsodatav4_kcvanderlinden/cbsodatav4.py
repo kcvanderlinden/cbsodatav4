@@ -18,7 +18,7 @@ def getData(target_url:str, tableLength:int=0):
         queryAmount = int(math.ceil(tableLength / 100000))
         queryJobs = [f"{target_url}?$skip={i*100000}" for i in range(queryAmount)]
         
-        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+        with concurrent.futures.ThreadPoolExecutor() as executor:
             futures = [executor.submit(cbsConnect, job) for job in queryJobs]
             concurrent.futures.wait(futures)
             listOfListOfDicts = [future.result() for future in futures]
