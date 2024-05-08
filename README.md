@@ -4,11 +4,8 @@ This is a Python application that retrieves data from the CBS OData API and conv
 
 ## Usage
 To use this application, follow these steps:
-1. Install the package using the following command:
-```python
-pip install git+https://github.com/kcvanderlinden/cbsodatav4.git
-```
-2. Install the required packages by running `pip install -r https://raw.githubusercontent.com/kcvanderlinden/cbsodatav4/main/requirements.txt` in your terminal.
+1. Install the package using the following pip command: `pip install git+https://github.com/kcvanderlinden/cbsodatav4.git`.
+2. Install the required packages by running another pip command `pip install -r https://raw.githubusercontent.com/kcvanderlinden/cbsodatav4/main/requirements.txt`.
 3. Create a new Python file and import the necessary libraries:
 ```python
 import pandas as pd
