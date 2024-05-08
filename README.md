@@ -8,7 +8,7 @@ To use this application, follow these steps:
 ```python
 pip install git+https://github.com/kcvanderlinden/cbsodatav4.git
 ```
-2. Install the required packages by running `pip install -r requirements.txt` in your terminal.
+2. Install the required packages by running `pip install -r https://raw.githubusercontent.com/kcvanderlinden/cbsodatav4/main/requirements.txt` in your terminal.
 3. Create a new Python file and import the necessary libraries:
 ```python
 import pandas as pd
