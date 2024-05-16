@@ -85,23 +85,30 @@ def fullDataset(tableID:str, limit:int=None, dataFilter:str=None):
     limit: int, the maximum number of rows to retrieve
     dataFilter: str, the filter to apply to the data
     '''
-    df = getData(targetUrl(tableID, "Observations", limit, dataFilter), tableLengthObservations(tableID))
-    columns = {df['name'].replace('Codes', ''):f"/{df['name']}" for df in requests.get(f"https://odata4.cbs.nl/CBS/{tableID}").json()['value'] if df['name'].endswith("Codes")}
+    rowAmount = limit if limit is not None else tableLengthObservations(tableID)
+    df = getData(targetUrl(tableID, "Observations", limit, dataFilter), rowAmount)
+    columns = [f"{df['name']}" for df in requests.get(f"https://odata4.cbs.nl/CBS/{tableID}").json()['value'] if df['name'].endswith("Codes")]
     for column in columns:
-        codes = getData(targetUrl(tableID, column, limit, dataFilter))
-        df = pd.merge(df, codes, left_on=column, right_on="Identifier")
-        if "PresentationType" in codes.columns:
-            df.loc[df["PresentationType"]=="Relative", "Value"] = df["Value"] / 100 # TODO not always true, so disable
-            df["Type waarde"] = df["PresentationType"]
+        codes = getData(targetUrl(tableID, column))
+        columnCleanName = column.replace("Codes", "")
+        df = pd.merge(df, codes, left_on=columnCleanName, right_on="Identifier")
+        # if "PresentationType" in codes.columns:
+            # df.loc[df["PresentationType"]=="Relative", "Value"] = df["Value"] / 100 # TODO "Unit" gebruiken om te bepalen hoe getal bewerkt moet worden.
+            # df["Type waarde"] = df["PresentationType"]
         columnsToKeep = ["Title"]
         if column.startswith("Wijken"):
             df = df.rename(columns={column: "RegioCode"})
             df["GemeenteCode"] = df["DimensionGroupId"]
-        if column == "RegioS":
-            df = df.rename(columns={"Identifier": "RegioCode"})
-        columnsToDrop = [col for col in list(set(codes.columns) - set(columnsToKeep))+ [column] if col in df.columns] 
+            df['RegioCode'] = df['WijkenEnBuurten']
+        if column.lower().endswith("regioscodes"):
+            df[column] = df[column.replace("Codes", "")].copy()
+            columnsToKeep += column
+        # if column == "RegioSCodes":
+        #     df = df.rename(columns={"RegioS": "RegioCode"})
+        columnsToDrop = [col for col in list(set(codes.columns) - set(columnsToKeep))+ [column.replace("Codes", "")] if col in df.columns] 
         df = df.drop(columns=columnsToDrop)   
-        df = df.rename(columns={"Title": column})
+        df = df.rename(columns={"Title": columnCleanName})
+    df = df.drop(columns=['ValueAttribute', 'StringValue']) # TODO check if these columns are always present
     return df 
 
 def specificTable(tableID:str, name:str, limit:int=None, dataFilter:str=None):
@@ -130,7 +137,7 @@ def tableName(tableID:str, name:str, dataFilter:str, limit:int):
     elif name==None:
         tablename += "_allTables"
     if dataFilter!=None:
-        filter_as_string = dataFilter.replace("eq", "").replace("'", "").replace('"', "").strip() # TODO as one regex
+        filter_as_string = dataFilter.replace(" eq", "").replace("'", "").replace('"', "").replace(' ', '_').strip() # TODO as one regex
         tablename += "_" + filter_as_string
     if limit!=None:
         tablename += f"_limit={limit}"
@@ -153,14 +160,15 @@ def targetUrl(tableID:str, name:str, limit:int=None, dataFilter:str=None):
     dataFilter: str, the filter to apply to the data
     '''
     tableUrl = f"https://odata4.cbs.nl/CBS/{tableID}"
-    d = {'Observations':'/Observations'}|{df['name'].replace('Codes', ''):f"/{df['name']}" for df in requests.get(f"https://odata4.cbs.nl/CBS/{tableID}").json()['value'] if df['name'].endswith("Codes")}
+    d = ['Observations']+[f"{df['name']}" for df in requests.get(f"https://odata4.cbs.nl/CBS/{tableID}").json()['value'] if df['name'].endswith("Codes")]
     if name not in d:
-        raise ValueError(f"Invalid name '{name}'. Choose from {', '.join(d.keys())}")
-    target_url = tableUrl + d[name]
+        raise ValueError(f"Invalid name '{name}'. Choose from {', '.join(d)}")
+    target_url = f"{tableUrl}/{name}"
     if limit != None:
         target_url += f"?$top={limit}"
-    if dataFilter != None and name == "data":
+        target_url += f"&" if dataFilter != None else ""
+    if dataFilter != None:
         # TODO check for dataFilter if column is in the data
-        target_url += f"?$dataFilter={dataFilter}"
+        target_url += f"?$filter={dataFilter}"
 
     return target_url
