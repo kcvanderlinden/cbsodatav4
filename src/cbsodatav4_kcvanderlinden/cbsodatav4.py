@@ -5,6 +5,11 @@ import os
 import math
 
 def cbsConnect(target_url:str):
+    '''
+    This function connects to the CBS API and returns a list of dictionaries.
+    target_url: str, the URL is the url that contains the data you want to retrieve
+    returns: list
+    '''
     result = (requests.get(target_url).json())['value']
     return result
 
@@ -87,9 +92,11 @@ def fullDataset(tableID:str, limit:int=None, dataFilter:str=None):
     '''
     rowAmount = limit if limit is not None else tableLengthObservations(tableID)
     df = getData(targetUrl(tableID, "Observations", limit, dataFilter), rowAmount)
-    columns = [f"{df['name']}" for df in requests.get(f"https://odata4.cbs.nl/CBS/{tableID}").json()['value'] if df['name'].endswith("Codes")]
-    for column in columns:
-        codes = getData(targetUrl(tableID, column))
+    code_columns = [f"{df['name']}" for df in requests.get(f"https://odata4.cbs.nl/CBS/{tableID}").json()['value'] if df['name'].endswith("Codes")]
+    group_columns = [f"{df['name']}" for df in requests.get(f"https://odata4.cbs.nl/CBS/{tableID}").json()['value'] if df['name'].endswith("Groups")]
+    columnsToDrop = []
+    for column in code_columns+group_columns:
+        codes = getData(targetUrl(tableID, column))["Identifier", "Title", "MeasureGroupId"]
         columnCleanName = column.replace("Codes", "")
         df = pd.merge(df, codes, left_on=columnCleanName, right_on="Identifier")
         # if "PresentationType" in codes.columns:
@@ -105,9 +112,9 @@ def fullDataset(tableID:str, limit:int=None, dataFilter:str=None):
             columnsToKeep += column
         # if column == "RegioSCodes":
         #     df = df.rename(columns={"RegioS": "RegioCode"})
-        columnsToDrop = [col for col in list(set(codes.columns) - set(columnsToKeep))+ [column.replace("Codes", "")] if col in df.columns] 
-        df = df.drop(columns=columnsToDrop)   
+        columnsToDrop += [col for col in list(set(codes.columns) - set(columnsToKeep))+ [column.replace("Codes", "")] if col in df.columns]    
         df = df.rename(columns={"Title": columnCleanName})
+    df = df.drop(columns=columnsToDrop)
     df = df.drop(columns=['ValueAttribute', 'StringValue']) # TODO check if these columns are always present
     return df 
 
@@ -160,15 +167,26 @@ def targetUrl(tableID:str, name:str, limit:int=None, dataFilter:str=None):
     dataFilter: str, the filter to apply to the data
     '''
     tableUrl = f"https://odata4.cbs.nl/CBS/{tableID}"
-    d = ['Observations']+[f"{df['name']}" for df in requests.get(f"https://odata4.cbs.nl/CBS/{tableID}").json()['value'] if df['name'].endswith("Codes")]
-    if name not in d:
-        raise ValueError(f"Invalid name '{name}'. Choose from {', '.join(d)}")
+    # d = ['Observations']+[f"{df['name']}" for df in requests.get(f"https://odata4.cbs.nl/CBS/{tableID}").json()['value'] if df['name'].endswith("Codes")]
+    # if name not in d:
+    #     raise ValueError(f"Invalid name '{name}'. Choose from {', '.join(d)}")
     target_url = f"{tableUrl}/{name}"
     if limit != None:
         target_url += f"?$top={limit}"
         target_url += f"&" if dataFilter != None else ""
     if dataFilter != None:
-        # TODO check for dataFilter if column is in the data
+        # TODO check in the string dataFilter if the columnname is present and then add it to the filter, otherwise raise an error that the column name
+        # is not in the df
+        # example of dataFilter: "DimensionGroupId eq '123456789'"
+        
+        variableToFilter = dataFilter.split("eq")[0].strip()
+        if variableToFilter not in d:
+            raise ValueError(f"Invalid dataFilter '{dataFilter}'. Choose from {', '.join(d)}")
+
         target_url += f"?$filter={dataFilter}"
 
     return target_url
+
+
+
+
