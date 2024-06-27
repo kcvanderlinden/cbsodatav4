@@ -77,10 +77,11 @@ def DataFrame(tableID:str, name:str=None, limit:int=None, dataFilter:str=None, c
     else:
         df = specificTable(tableID, name, limit, dataFilter)
 
-    # check if cache folder exists, otherwise create it
-    if not os.path.exists("./cache"):
-        os.makedirs("./cache")
-    df.to_csv(f"./cache/{tablename}.csv", index=False)
+    # if cache is true, check if cache folder exists, otherwise create it
+    if cache:
+        if not os.path.exists("./cache"):
+            os.makedirs("./cache")
+        df.to_csv(f"./cache/{tablename}.csv", index=False)
     return df
 
 def fullDataset(tableID:str, limit:int=None, dataFilter:str=None):
@@ -93,30 +94,40 @@ def fullDataset(tableID:str, limit:int=None, dataFilter:str=None):
     rowAmount = limit if limit is not None else tableLengthObservations(tableID)
     df = getData(targetUrl(tableID, "Observations", limit, dataFilter), rowAmount)
     code_columns = [f"{df['name']}" for df in requests.get(f"https://odata4.cbs.nl/CBS/{tableID}").json()['value'] if df['name'].endswith("Codes")]
-    group_columns = [f"{df['name']}" for df in requests.get(f"https://odata4.cbs.nl/CBS/{tableID}").json()['value'] if df['name'].endswith("Groups")]
-    columnsToDrop = []
+    group_columns = ['MeasureGroups'] # [f"{df['name']}" for df in requests.get(f"https://odata4.cbs.nl/CBS/{tableID}").json()['value'] if df['name'].endswith("Groups")]
+    
     for column in code_columns+group_columns:
-        codes = getData(targetUrl(tableID, column)) # ["Identifier", "Title", "MeasureGroupId"]
-        columnCleanName = column.replace("Codes", "")
-        df = pd.merge(df, codes, left_on=columnCleanName, right_on="Identifier")
-        # if "PresentationType" in codes.columns:
-            # df.loc[df["PresentationType"]=="Relative", "Value"] = df["Value"] / 100 # TODO "Unit" gebruiken om te bepalen hoe getal bewerkt moet worden.
-            # df["Type waarde"] = df["PresentationType"]
-        columnsToKeep = ["Title"]
+        dimTable = getData(targetUrl(tableID, column))
+        dimTable = dimTable.drop(columns=["Index", "Description"])
+        if column.endswith("Codes"): # Codes are used to map to a specific dimensions
+            df = pd.merge(df, dimTable, left_on=column.replace("Codes", ""), right_on="Identifier")
+            df = df.rename(columns={"Title": f"{column}Title"})
+        elif column.endswith("Groups"): # Groups are used to create a hierarchy
+            parents_list = []
+            for index, row in dimTable.iterrows():
+                parents = get_parents(row, dimTable)
+                parents_list.append(parents)
+            dimTable['Parents'] = parents_list
+            dimTable.rename(columns={'Id':f'{column}MergeId'}, inplace=True)
+            df = pd.merge(df, dimTable, left_on=column.replace("Groups", "GroupId"), right_on=f'{column}MergeId', how='left')
+            df = df.rename(columns={"Title": f"{column}Title"})
         if column.startswith("Wijken"):
             df = df.rename(columns={column: "RegioCode"})
             df["GemeenteCode"] = df["DimensionGroupId"]
             df['RegioCode'] = df['WijkenEnBuurten']
         if column.lower().endswith("regioscodes"):
             df[column] = df[column.replace("Codes", "")].copy()
-            columnsToKeep += column
-        # if column == "RegioSCodes":
-        #     df = df.rename(columns={"RegioS": "RegioCode"})
-        columnsToDrop += [col for col in list(set(codes.columns) - set(columnsToKeep))+ [column.replace("Codes", "")] if col in df.columns]    
-        df = df.rename(columns={"Title": columnCleanName})
-    df = df.drop(columns=columnsToDrop)
-    df = df.drop(columns=['ValueAttribute', 'StringValue']) # TODO check if these columns are always present
-    return df 
+    standardColumns =  ['Id','Value', 'ValueAttribute', 'StringValue','RegioSCodes', 'Parents', 'GemeenteCode', 'RegioCode']
+    columnsToKeep = [col for col in df.columns if col.endswith('Title')]+[col for col in df.columns if col in standardColumns]
+    df = df[columnsToKeep]
+
+    # replace 'Codes','Groups' and 'Title' in columnnames
+    df.columns = [col.replace('CodesTitle', '').replace("GroupsTitle", "") for col in df.columns] 
+
+    # lowercase all columnnames
+    df.columns  = [col.lower() for col in df.columns]
+    
+    return df
 
 def specificTable(tableID:str, name:str, limit:int=None, dataFilter:str=None):
     '''
@@ -167,7 +178,7 @@ def targetUrl(tableID:str, name:str, limit:int=None, dataFilter:str=None):
     dataFilter: str, the filter to apply to the data
     '''
     tableUrl = f"https://odata4.cbs.nl/CBS/{tableID}"
-    # d = ['Observations']+[f"{df['name']}" for df in requests.get(f"https://odata4.cbs.nl/CBS/{tableID}").json()['value'] if df['name'].endswith("Codes")]
+    d = ['Observations']+[f"{df['name']}" for df in requests.get(f"https://odata4.cbs.nl/CBS/{tableID}").json()['value'] if df['name'].endswith("Codes")]
     # if name not in d:
     #     raise ValueError(f"Invalid name '{name}'. Choose from {', '.join(d)}")
     target_url = f"{tableUrl}/{name}"
@@ -178,15 +189,29 @@ def targetUrl(tableID:str, name:str, limit:int=None, dataFilter:str=None):
         # TODO check in the string dataFilter if the columnname is present and then add it to the filter, otherwise raise an error that the column name
         # is not in the df
         # example of dataFilter: "DimensionGroupId eq '123456789'"
-        
+
         variableToFilter = dataFilter.split("eq")[0].strip()
         if variableToFilter not in d:
             raise ValueError(f"Invalid dataFilter '{dataFilter}'. Choose from {', '.join(d)}")
+        
 
         target_url += f"?$filter={dataFilter}"
 
     return target_url
 
-
-
-
+def get_parents(row:str, df: pd.DataFrame):
+    '''
+    this function returns the titles of all parents of a row in a dataframe.
+    row: str, the id of a row in a dataframe
+    df: pd.DataFrame, the dataframe to get the row from, and also used as a cache for already processed rows
+    '''
+    parent = row['ParentId']
+    parentTitles = []
+    while parent is not None:
+        p = df[df['Id'] == parent]
+        if not p.empty:
+            parentTitles.append(p.iloc[0]['Title'])
+            parent = p.iloc[0]['ParentId']
+        else:
+            break
+    return '|'.join(parentTitles[::-1])
