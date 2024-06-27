@@ -93,23 +93,33 @@ def fullDataset(tableID:str, limit:int=None, dataFilter:str=None):
     '''
     rowAmount = limit if limit is not None else tableLengthObservations(tableID)
     df = getData(targetUrl(tableID, "Observations", limit, dataFilter), rowAmount)
-    code_columns = [f"{df['name']}" for df in requests.get(f"https://odata4.cbs.nl/CBS/{tableID}").json()['value'] if df['name'].endswith("Codes")]
-    group_columns = ['MeasureGroups'] # [f"{df['name']}" for df in requests.get(f"https://odata4.cbs.nl/CBS/{tableID}").json()['value'] if df['name'].endswith("Groups")]
+    availableDimTables = [df['name'] for df in requests.get(f"https://odata4.cbs.nl/CBS/{tableID}").json()['value']]
+    codeDimTables = [dtable for dtable in availableDimTables if dtable.endswith("Codes")]
+    groupDimTables = [dtable for dtable in availableDimTables if dtable.endswith("Groups") and dtable not in ['PeriodenGroups', 'RegioSGroups']]
     
-    for column in code_columns+group_columns:
-        dimTable = getData(targetUrl(tableID, column))
+    for column in codeDimTables+groupDimTables:
+        try:
+            dimTable = getData(targetUrl(tableID, column))
+        except:
+            continue
         dimTable = dimTable.drop(columns=["Index", "Description"])
         if column.endswith("Codes"): # Codes are used to map to a specific dimensions
+            for col in dimTable.columns: 
+                if col.lower().endswith('id'):
+                    dimTable.rename(columns={col:f'{column.replace("Codes", "")}Id'}, inplace=True)
             df = pd.merge(df, dimTable, left_on=column.replace("Codes", ""), right_on="Identifier")
             df = df.rename(columns={"Title": f"{column}Title"})
         elif column.endswith("Groups"): # Groups are used to create a hierarchy
+            
             parents_list = []
             for index, row in dimTable.iterrows():
                 parents = get_parents(row, dimTable)
                 parents_list.append(parents)
-            dimTable['Parents'] = parents_list
+            dimTable[f'{column.replace("Groups", "")}parents'] = parents_list
             dimTable.rename(columns={'Id':f'{column}MergeId'}, inplace=True)
-            df = pd.merge(df, dimTable, left_on=column.replace("Groups", "GroupId"), right_on=f'{column}MergeId', how='left')
+            columndfMerge = [col for col in df.columns if col.lower().endswith('id') and col.startswith(column.replace("Groups", ""))][0]
+            df = pd.merge(df, dimTable, left_on=columndfMerge, right_on=
+            f'{column}MergeId', how='left')
             df = df.rename(columns={"Title": f"{column}Title"})
         if column.startswith("Wijken"):
             df = df.rename(columns={column: "RegioCode"})
@@ -118,11 +128,13 @@ def fullDataset(tableID:str, limit:int=None, dataFilter:str=None):
         if column.lower().endswith("regioscodes"):
             df[column] = df[column.replace("Codes", "")].copy()
     standardColumns =  ['Id','Value', 'ValueAttribute', 'StringValue','RegioSCodes', 'Parents', 'GemeenteCode', 'RegioCode']
-    columnsToKeep = [col for col in df.columns if col.endswith('Title')]+[col for col in df.columns if col in standardColumns]
+    columnsToKeep = [col for col in df.columns if col in standardColumns]
+    columnsToKeep += [col for col in df.columns if col.endswith('Title')]
+    columnsToKeep += [col for col in df.columns if col.endswith('parents')]
     df = df[columnsToKeep]
 
     # replace 'Codes','Groups' and 'Title' in columnnames
-    df.columns = [col.replace('CodesTitle', '').replace("GroupsTitle", "") for col in df.columns] 
+    df.columns = [col.replace('CodesTitle', '').replace("GroupsTitle", "Category") for col in df.columns] 
 
     # lowercase all columnnames
     df.columns  = [col.lower() for col in df.columns]
