@@ -96,7 +96,7 @@ def fullDataset(tableID:str, limit:int=None, dataFilter:str=None):
     group_columns = [f"{df['name']}" for df in requests.get(f"https://odata4.cbs.nl/CBS/{tableID}").json()['value'] if df['name'].endswith("Groups")]
     columnsToDrop = []
     for column in code_columns+group_columns:
-        codes = getData(targetUrl(tableID, column))["Identifier", "Title", "MeasureGroupId"]
+        codes = getData(targetUrl(tableID, column)) # ["Identifier", "Title", "MeasureGroupId"]
         columnCleanName = column.replace("Codes", "")
         df = pd.merge(df, codes, left_on=columnCleanName, right_on="Identifier")
         # if "PresentationType" in codes.columns:
