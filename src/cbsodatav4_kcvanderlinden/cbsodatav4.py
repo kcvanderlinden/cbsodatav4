@@ -107,7 +107,8 @@ def fullDataset(tableID:str, limit:int=None, dataFilter:str=None):
             for col in dimTable.columns: 
                 if col.lower().endswith('id'):
                     dimTable.rename(columns={col:f'{column.replace("Codes", "")}Id'}, inplace=True)
-            df = pd.merge(df, dimTable, left_on=column.replace("Codes", ""), right_on="Identifier")
+            dimTable.rename(columns={"Identifier": column.replace("Codes", "")}, inplace=True)
+            df = pd.merge(df, dimTable, on=column.replace("Codes", ""))
             df = df.rename(columns={"Title": f"{column}Title"})
         elif column.endswith("Groups"): # Groups are used to create a hierarchy
             
@@ -118,8 +119,7 @@ def fullDataset(tableID:str, limit:int=None, dataFilter:str=None):
             dimTable[f'{column.replace("Groups", "")}parents'] = parents_list
             dimTable.rename(columns={'Id':f'{column}MergeId'}, inplace=True)
             columndfMerge = [col for col in df.columns if col.lower().endswith('id') and col.startswith(column.replace("Groups", ""))][0]
-            df = pd.merge(df, dimTable, left_on=columndfMerge, right_on=
-            f'{column}MergeId', how='left')
+            df = pd.merge(df, dimTable, left_on=columndfMerge, right_on=f'{column}MergeId', how='left')
             df = df.rename(columns={"Title": f"{column}Title"})
         if column.startswith("Wijken"):
             df = df.rename(columns={column: "RegioCode"})
