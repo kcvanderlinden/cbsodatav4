@@ -17,7 +17,6 @@ def cbsConnect(target_url:str):
     session = requests.Session()
     retries = Retry(total=5, backoff_factor=1, status_forcelist=[ 500, 502, 503, 504 ])
     session.mount('https://', HTTPAdapter(max_retries=retries))
-    print(target_url)
     retry_count = 0
     while retry_count < 5:
         try:
