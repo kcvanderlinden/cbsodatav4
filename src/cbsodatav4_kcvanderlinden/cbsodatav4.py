@@ -4,6 +4,8 @@ import concurrent.futures
 import os
 import math
 
+basic_odata_url = 'https://datasets.cbs.nl/odata/v1/CBS/'
+
 def cbsConnect(target_url:str):
     '''
     This function connects to the CBS API and returns a list of dictionaries.
@@ -93,7 +95,7 @@ def fullDataset(tableID:str, limit:int=None, dataFilter:str=None):
     '''
     rowAmount = limit if limit is not None else tableLengthObservations(tableID)
     df = getData(targetUrl(tableID, "Observations", limit, dataFilter), rowAmount)
-    availableDimTables = [df['name'] for df in requests.get(f"https://odata4.cbs.nl/CBS/{tableID}").json()['value']]
+    availableDimTables = [df['name'] for df in requests.get(f"{basic_odata_url}{tableID}").json()['value']]
     codeDimTables = [dtable for dtable in availableDimTables if dtable.endswith("Codes")]
     groupDimTables = [dtable for dtable in availableDimTables if dtable.endswith("Groups") and dtable not in ['PeriodenGroups', 'RegioSGroups']]
     
@@ -178,7 +180,7 @@ def tableLengthObservations(tableID:str):
     Get the number of rows in the observations table.
     tableID: str, the table ID of the dataset
     '''
-    observationCount = requests.get(f"https://odata4.cbs.nl/CBS/{tableID}/Properties").json()['ObservationCount']
+    observationCount = requests.get(f"{basic_odata_url}{tableID}/Properties").json()['ObservationCount']
     return observationCount
 
 def targetUrl(tableID:str, name:str, limit:int=None, dataFilter:str=None):
@@ -189,8 +191,8 @@ def targetUrl(tableID:str, name:str, limit:int=None, dataFilter:str=None):
     limit: int, the maximum number of rows to retrieve
     dataFilter: str, the filter to apply to the data
     '''
-    tableUrl = f"https://odata4.cbs.nl/CBS/{tableID}"
-    d = ['Observations']+[f"{df['name']}" for df in requests.get(f"https://odata4.cbs.nl/CBS/{tableID}").json()['value'] if df['name'].endswith("Codes")]
+    tableUrl = f"{basic_odata_url}{tableID}"
+    d = ['Observations']+[f"{df['name']}" for df in requests.get(tableUrl).json()['value'] if df['name'].endswith("Codes")]
     # if name not in d:
     #     raise ValueError(f"Invalid name '{name}'. Choose from {', '.join(d)}")
     target_url = f"{tableUrl}/{name}"
