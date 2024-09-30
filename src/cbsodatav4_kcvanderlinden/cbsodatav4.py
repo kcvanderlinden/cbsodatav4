@@ -1,5 +1,7 @@
 import pandas as pd
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util import Retry
 import concurrent.futures
 import os
 import math
@@ -12,8 +14,23 @@ def cbsConnect(target_url:str):
     target_url: str, the URL is the url that contains the data you want to retrieve
     returns: list
     '''
-    result = (requests.get(target_url).json())['value']
-    return result
+    session = requests.Session()
+    retries = Retry(total=5, backoff_factor=1, status_forcelist=[ 500, 502, 503, 504 ])
+    session.mount('https://', HTTPAdapter(max_retries=retries))
+    print(target_url)
+    retry_count = 0
+    while retry_count < 5:
+        try:
+            response = session.get(target_url)
+            if response.status_code == 200:
+                return response.json()['value']
+            else:
+                raise requests.exceptions.RequestException(f"HTTP {response.status_code}")
+        except requests.exceptions.ChunkedEncodingError:
+            print(f"ChunkedEncodingError occurred. Retrying...")
+            retry_count += 1
+            if retry_count == 5:
+                raise requests.exceptions.ChunkedEncodingError("Max retries exceeded")
 
 def getData(target_url:str, tableLength:int=0):
     '''
