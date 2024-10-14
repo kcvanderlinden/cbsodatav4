@@ -2,10 +2,9 @@ import pandas as pd
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util import Retry
-import concurrent.futures
 import os
-import math
 import sqlite3
+import sys
 
 basic_odata_url = 'https://datasets.cbs.nl/odata/v1/CBS/'
 
@@ -119,33 +118,22 @@ def fullDataset(tableID:str, limit:int=None, dataFilter:str=None, customFilter:s
     limit: int, the maximum number of rows to retrieve
     dataFilter: str, the filter to apply to the data
     '''
-    # rowAmount = limit if limit is not None else tableLengthObservations(tableID)
-    
     if customFilter is not None:
         typefilter = customFilter['type']
         filtervalue = customFilter['filterValue']
         df_type = df = pd.DataFrame(specificTable(tableID, typefilter))
         dataFilterValues = df_type.loc[df_type["Identifier"].str.contains(filtervalue), "Identifier"].values
         dataFilterlist = [f"RegioS eq '{val}'" for val in dataFilterValues]
-        # df = pd.DataFrame()
-        # check if json file exists, otherwise remove
-        if os.path.exists("./cache/data.json"):
-            os.remove("./cache/data.json")
-        
-        
         conn = sqlite3.connect(':memory:')
         for i, dataFilter in enumerate(dataFilterlist):
-            # df = pd.concat([df, getData(targetUrl(tableID, "Observations", limit, dataFilter), rowAmount)], ignore_index=True)
-            # https://stackoverflow.com/questions/45505850/append-to-a-pickle-file-without-deleting
+            statusPrint(len(dataFilterlist), i)
             df = getData(targetUrl(tableID, "Observations", limit, dataFilter))
-           
             tableCreated = True if i > 0 else False
             cacheTable(df, 'data_table', conn, tableCreated)
-
-        # Read from SQLite to DataFrame (or use pandas as needed)
         df = pd.read_sql('SELECT * FROM data_table', conn)
     else:
         df = getData(targetUrl(tableID, "Observations", limit, dataFilter))
+    
     availableDimTables = [df['name'] for df in requests.get(f"{basic_odata_url}{tableID}").json()['value']]
     codeDimTables = [dtable for dtable in availableDimTables if dtable.endswith("Codes")]
     groupDimTables = [dtable for dtable in availableDimTables if dtable.endswith("Groups") and dtable not in ['PeriodenGroups', 'RegioSGroups']]
@@ -164,7 +152,6 @@ def fullDataset(tableID:str, limit:int=None, dataFilter:str=None, customFilter:s
             df = pd.merge(df, dimTable, on=column.replace("Codes", ""))
             df = df.rename(columns={"Title": f"{column}Title"})
         elif column.endswith("Groups"): # Groups are used to create a hierarchy
-            
             parents_list = []
             for index, row in dimTable.iterrows():
                 parents = get_parents(row, dimTable)
@@ -221,7 +208,7 @@ def tableName(tableID:str, name:str, dataFilter:str, limit:int):
         tablename += "_allTables"
     if dataFilter!=None:
         filter_as_string = dataFilter.replace(" eq", "").replace("'", "").replace('"', "").replace(' ', '_').strip() # TODO as one regex
-        tablename += "_" + filter_as_string
+        tablename += "_" + filter_as_string 
     if limit!=None:
         tablename += f"_limit={limit}"
     return tablename
@@ -243,23 +230,11 @@ def targetUrl(tableID:str, name:str, limit:int=None, dataFilter:str=None):
     dataFilter: str, the filter to apply to the data
     '''
     tableUrl = f"{basic_odata_url}{tableID}"
-    # d = ['Observations']+[f"{df['name']}" for df in requests.get(tableUrl).json()['value'] if df['name'].endswith("Codes")]
-    # if name not in d:
-    #     raise ValueError(f"Invalid name '{name}'. Choose from {', '.join(d)}")
     target_url = f"{tableUrl}/{name}"
     if limit != None:
         target_url += f"?$top={limit}"
         target_url += f"&" if dataFilter != None else ""
     if dataFilter != None:
-        # TODO check in the string dataFilter if the columnname is present and then add it to the filter, otherwise raise an error that the column name
-        # is not in the df
-        # example of dataFilter: "DimensionGroupId eq '123456789'"
-
-        # variableToFilter = dataFilter.split("eq")[0].strip()
-        # if variableToFilter not in d:
-        #     raise ValueError(f"Invalid dataFilter '{dataFilter}'. Choose from {', '.join(d)}")
-        
-
         target_url += f"?$filter={dataFilter}"
 
     return target_url
@@ -280,3 +255,8 @@ def get_parents(row:str, df: pd.DataFrame):
         else:
             break
     return '|'.join(parentTitles[::-1])
+
+def statusPrint(totalAmount:int, currentAmount:int):
+    sys.stdout.write('\r')
+    sys.stdout.write(f"[%-{totalAmount}s] %d%%" % ('='*(currentAmount+1), currentAmount/totalAmount*100))
+    sys.stdout.flush()
