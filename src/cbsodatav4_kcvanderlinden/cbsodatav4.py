@@ -5,6 +5,10 @@ from urllib3.util import Retry
 import os
 import sqlite3
 import sys
+import concurrent.futures
+import json
+import dask.dataframe as dd
+import sqlalchemy
 
 basic_odata_url = 'https://datasets.cbs.nl/odata/v1/CBS/'
 
@@ -18,11 +22,16 @@ def cbsConnect(target_url:str):
     retries = Retry(total=5, backoff_factor=1, status_forcelist=[ 500, 502, 503, 504 ])
     session.mount('https://', HTTPAdapter(max_retries=retries))
     retry_count = 0
-    while retry_count < 5:
+    data = []
+    while True:
         try:
             response = session.get(target_url)
             if response.status_code == 200:
-                return response.json()
+                # for chunk in response.iter_lines(decode_unicode=True):
+                #     row = json.loads(chunk)
+                #     data.append(row)
+                #  # Raise an exception for bad status codes
+                data = response.json()  # Load the JSON data directly from the response object
             else:
                 raise requests.exceptions.RequestException(f"HTTP {response.status_code}")
         except requests.exceptions.ChunkedEncodingError:
@@ -30,6 +39,11 @@ def cbsConnect(target_url:str):
             retry_count += 1
             if retry_count == 5:
                 raise requests.exceptions.ChunkedEncodingError("Max retries exceeded")
+        except json.JSONDecodeError as e:
+            print(f"JSON decode error: {e}. Retrying...")
+        else:
+            break
+    return data
 
 def getData(target_url:str) -> pd.DataFrame:
     '''
@@ -51,16 +65,18 @@ def getData(target_url:str) -> pd.DataFrame:
             pages_read += 1
             nextPage = True if "@odata.nextLink" in response else False
             target_url = response["@odata.nextLink"] if nextPage else None
-    df = pd.read_sql('SELECT * FROM loop_data', conn)
+    # df = pd.read_sql('SELECT * FROM loop_data', conn)
+    df = dd.read_sql_table('loop_data', 'sqlite:///./temp.db', index_col='Id')
     return df
 
 def cacheTable(df: pd.DataFrame, tableName: str, conn, tableCreated: bool = False):
     if tableCreated == False:
         c = conn.cursor()
-        columns = df.columns.tolist()
-        create_table_query = f"CREATE TABLE {tableName} ({', '.join([f'{col} TEXT' for col in columns])});"
-        c.execute(create_table_query)
+        # columns = df.columns.tolist()
+        # create_table_query = f"CREATE TABLE {tableName} ({', '.join([f'{col} TEXT' for col in columns])});"
+        #c.execute(create_table_query)
     df.to_sql(tableName, conn, if_exists='append', index=False)
+    
 
 def DataFrame(tableID:str, name:str=None, limit:int=None, dataFilter:str=None, customFilter:str=None, cache:bool=False) -> pd.DataFrame:
     """
@@ -124,13 +140,25 @@ def fullDataset(tableID:str, limit:int=None, dataFilter:str=None, customFilter:s
         df_type = df = pd.DataFrame(specificTable(tableID, typefilter))
         dataFilterValues = df_type.loc[df_type["Identifier"].str.contains(filtervalue), "Identifier"].values
         dataFilterlist = [f"RegioS eq '{val}'" for val in dataFilterValues]
-        conn = sqlite3.connect(':memory:')
-        for i, dataFilter in enumerate(dataFilterlist):
-            statusPrint(len(dataFilterlist), i)
-            df = getData(targetUrl(tableID, "Observations", limit, dataFilter))
-            tableCreated = True if i > 0 else False
-            cacheTable(df, 'data_table', conn, tableCreated)
-        df = pd.read_sql('SELECT * FROM data_table', conn)
+        conn = sqlite3.connect('./temp.db')
+        sys.stdout.write(f'Totaal aantal soorten op basis van filter {len(dataFilterlist)}')
+        sys.stdout.write('\n')
+        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+            futures = {executor.submit(getData, targetUrl(tableID, "Observations", limit, filter)): i for i, filter in enumerate(dataFilterlist)}
+            for i, future in enumerate(concurrent.futures.as_completed(futures)):
+                statusPrint(len(dataFilterlist), i)
+                try:
+                    df = future.result()
+                    tableCreated = True if i > 0 else False
+                    cacheTable(df, 'data_table', conn, tableCreated)
+                except Exception as e:
+                    print(f"Error processing filter {i}: {e}")
+        # Instead of using pandas.read_sql to read the entire table into memory,
+        # use dask.dataframe.read_sql to read it in chunks.
+        # query = f"SELECT * FROM data_table"
+        # query = sqlalchemy.table("data_table", sqlalchemy.column("*"))
+        df = dd.read_sql_table('data_table', 'sqlite:///./temp.db', index_col='Id')
+        # df = df.compute()
     else:
         df = getData(targetUrl(tableID, "Observations", limit, dataFilter))
     
@@ -257,6 +285,9 @@ def get_parents(row:str, df: pd.DataFrame):
     return '|'.join(parentTitles[::-1])
 
 def statusPrint(totalAmount:int, currentAmount:int):
+    max_width_bar = 30
+    width_bar = totalAmount if totalAmount <= max_width_bar else max_width_bar
+    progress_in_bar = totalAmount / width_bar
     sys.stdout.write('\r')
-    sys.stdout.write(f"[%-{totalAmount}s] %d%%" % ('='*(currentAmount+1), currentAmount/totalAmount*100))
+    sys.stdout.write(f"[%-{progress_in_bar}s] %d%%" % ('='*(currentAmount+1), (currentAmount+1)/totalAmount*100))
     sys.stdout.flush()
