@@ -5,6 +5,7 @@ from urllib3.util import Retry
 import concurrent.futures
 import os
 import math
+import sqlite3
 
 basic_odata_url = 'https://datasets.cbs.nl/odata/v1/CBS/'
 
@@ -22,7 +23,7 @@ def cbsConnect(target_url:str):
         try:
             response = session.get(target_url)
             if response.status_code == 200:
-                return response.json()['value']
+                return response.json()
             else:
                 raise requests.exceptions.RequestException(f"HTTP {response.status_code}")
         except requests.exceptions.ChunkedEncodingError:
@@ -38,22 +39,31 @@ def getData(target_url:str, tableLength:int=0):
     tableLength: int, the number of rows in the table
     '''       
     if tableLength > 100000:
-        queryAmount = int(math.ceil(tableLength / 100000))
-        queryJobs = [f"{target_url}?$skip={i*100000}" for i in range(queryAmount)]
+        # queryAmount = int(math.ceil(tableLength / 100000))
+        # target_url += f'$skip=' if not '?' in target_url else '&$skip='
+        # queryJobs = [f"{target_url}{i*100000}" for i in range(queryAmount)]
+        listOfDicts = []
+        # with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        #     futures = [executor.submit(cbsConnect, job) for job in queryJobs]
+        #     concurrent.futures.wait(futures)
+        #     listOfListOfDicts = [future.result() for future in futures]
+        nextPage = True
+        while nextPage: 
+            response = cbsConnect(target_url)
+            listOfDicts += response['value'] 
+            nextPage = True if "@odata.nextLink" in response else False
+            target_url = response["@odata.nextLink"] if nextPage else None
         
-        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-            futures = [executor.submit(cbsConnect, job) for job in queryJobs]
-            concurrent.futures.wait(futures)
-            listOfListOfDicts = [future.result() for future in futures]
-            listOfDicts = [item for sublist in listOfListOfDicts for item in sublist]
-            df = pd.DataFrame(listOfDicts)
+        # listOfDicts = [item for sublist in listOfListOfDicts for item in sublist]
+        # df = pd.DataFrame(listOfDicts)
+        r = listOfDicts
     else:
-        r = requests.get(target_url).json()
-        df = pd.DataFrame(r['value'])
+        r = requests.get(target_url).json()['value'] 
+        # df = pd.DataFrame(r['value'])
     
-    return df
+    return r
 
-def DataFrame(tableID:str, name:str=None, limit:int=None, dataFilter:str=None, cache:bool=False):
+def DataFrame(tableID:str, name:str=None, limit:int=None, dataFilter:str=None, customFilter:str=None, cache:bool=False) -> pd.DataFrame():
     """
     Return a Pandas DataFrame containing the data from the CBS OData API.
     
@@ -91,9 +101,9 @@ def DataFrame(tableID:str, name:str=None, limit:int=None, dataFilter:str=None, c
     # get data
 
     if name == None:
-        df = fullDataset(tableID, limit, dataFilter)
+        df = fullDataset(tableID, limit, dataFilter, customFilter)
     else:
-        df = specificTable(tableID, name, limit, dataFilter)
+        df = pd.DataFrame(specificTable(tableID, name, limit, dataFilter, customFilter))
 
     # if cache is true, check if cache folder exists, otherwise create it
     if cache:
@@ -102,7 +112,16 @@ def DataFrame(tableID:str, name:str=None, limit:int=None, dataFilter:str=None, c
         df.to_csv(f"./cache/{tablename}.csv", index=False)
     return df
 
-def fullDataset(tableID:str, limit:int=None, dataFilter:str=None):
+def cacheTable(df: pd.DataFrame, conn, tableCreated: bool = False):
+    if tableCreated == False:
+        c = conn.cursor()
+        columns = df.columns.tolist()
+        create_table_query = f"CREATE TABLE data_table ({', '.join([f'{col} TEXT' for col in columns])});"
+        print(create_table_query)
+        c.execute(create_table_query)
+    df.to_sql('data_table', conn, if_exists='append', index=False)
+
+def fullDataset(tableID:str, limit:int=None, dataFilter:str=None, customFilter:str=None) -> pd.DataFrame():
     '''
     Get the full dataset of a table, including all codes
     tableID: str, the table ID of the dataset
@@ -110,7 +129,32 @@ def fullDataset(tableID:str, limit:int=None, dataFilter:str=None):
     dataFilter: str, the filter to apply to the data
     '''
     rowAmount = limit if limit is not None else tableLengthObservations(tableID)
-    df = getData(targetUrl(tableID, "Observations", limit, dataFilter), rowAmount)
+    if customFilter is not None:
+        typefilter = customFilter['type']
+        filtervalue = customFilter['filterValue']
+        df_type = df = pd.DataFrame(specificTable(tableID, typefilter))
+        dataFilterValues = df_type.loc[df_type["Identifier"].str.contains(filtervalue), "Identifier"].values
+        dataFilterlist = [f"RegioS eq '{val}'" for val in dataFilterValues]
+        # df = pd.DataFrame()
+        # check if json file exists, otherwise remove
+        if os.path.exists("./cache/data.json"):
+            os.remove("./cache/data.json")
+        
+        
+        conn = sqlite3.connect(':memory:')
+        for i, dataFilter in enumerate(dataFilterlist):
+            # df = pd.concat([df, getData(targetUrl(tableID, "Observations", limit, dataFilter), rowAmount)], ignore_index=True)
+            # https://stackoverflow.com/questions/45505850/append-to-a-pickle-file-without-deleting
+            df = pd.DataFrame(getData(targetUrl(tableID, "Observations", limit, dataFilter), rowAmount))
+           
+            tableCreated = True if i > 0 else False
+            cacheTable(df, conn, tableCreated)
+
+        # Read from SQLite to DataFrame (or use pandas as needed)
+        df = pd.read_sql('SELECT * FROM data_table', conn)
+    else:
+        listOfDicts = getData(targetUrl(tableID, "Observations", limit, dataFilter), rowAmount)
+        df = pd.DataFrame(listOfDicts)
     availableDimTables = [df['name'] for df in requests.get(f"{basic_odata_url}{tableID}").json()['value']]
     codeDimTables = [dtable for dtable in availableDimTables if dtable.endswith("Codes")]
     groupDimTables = [dtable for dtable in availableDimTables if dtable.endswith("Groups") and dtable not in ['PeriodenGroups', 'RegioSGroups']]
@@ -118,6 +162,7 @@ def fullDataset(tableID:str, limit:int=None, dataFilter:str=None):
     for column in codeDimTables+groupDimTables:
         try:
             dimTable = getData(targetUrl(tableID, column))
+            dimTable = pd.DataFrame(dimTable)
         except:
             continue
         dimTable = dimTable.drop(columns=["Index", "Description"])
@@ -208,7 +253,7 @@ def targetUrl(tableID:str, name:str, limit:int=None, dataFilter:str=None):
     dataFilter: str, the filter to apply to the data
     '''
     tableUrl = f"{basic_odata_url}{tableID}"
-    d = ['Observations']+[f"{df['name']}" for df in requests.get(tableUrl).json()['value'] if df['name'].endswith("Codes")]
+    # d = ['Observations']+[f"{df['name']}" for df in requests.get(tableUrl).json()['value'] if df['name'].endswith("Codes")]
     # if name not in d:
     #     raise ValueError(f"Invalid name '{name}'. Choose from {', '.join(d)}")
     target_url = f"{tableUrl}/{name}"
@@ -220,9 +265,9 @@ def targetUrl(tableID:str, name:str, limit:int=None, dataFilter:str=None):
         # is not in the df
         # example of dataFilter: "DimensionGroupId eq '123456789'"
 
-        variableToFilter = dataFilter.split("eq")[0].strip()
-        if variableToFilter not in d:
-            raise ValueError(f"Invalid dataFilter '{dataFilter}'. Choose from {', '.join(d)}")
+        # variableToFilter = dataFilter.split("eq")[0].strip()
+        # if variableToFilter not in d:
+        #     raise ValueError(f"Invalid dataFilter '{dataFilter}'. Choose from {', '.join(d)}")
         
 
         target_url += f"?$filter={dataFilter}"
