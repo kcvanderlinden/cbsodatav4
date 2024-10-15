@@ -8,7 +8,6 @@ import sys
 import concurrent.futures
 import json
 import dask.dataframe as dd
-import sqlalchemy
 
 basic_odata_url = 'https://datasets.cbs.nl/odata/v1/CBS/'
 
@@ -50,38 +49,46 @@ def getData(target_url:str) -> pd.DataFrame:
     Get the data from the target URL.
     target_url: str, the URL to get the data from
     tableLength: int, the number of rows in the table
-    '''       
-    conn = sqlite3.connect(':memory:')
+    '''
+    # conn = sqlite3.connect('./temp.db')
     pages_read = 0
     nextPage = True
-    while nextPage: 
+    while nextPage:
         response = cbsConnect(target_url)
         nextPage = True if "@odata.nextLink" in response else False
-        df = pd.DataFrame(response['value']) 
+        df = dd.from_pandas(pd.DataFrame(response['value']), npartitions=1)
+        df = df.compute() # Compute the dataframe to trigger the computation
+        # df = dd_df.drop_duplicates().compute()
         if not nextPage and pages_read == 0:
             return df
         else:
-            cacheTable(df, 'loop_data', conn, pages_read > 0)
+            cacheTable(df, 'loop_data', 'sqlite:///./temp.db', pages_read > 0)
             pages_read += 1
             nextPage = True if "@odata.nextLink" in response else False
             target_url = response["@odata.nextLink"] if nextPage else None
     # df = pd.read_sql('SELECT * FROM loop_data', conn)
     df = dd.read_sql_table('loop_data', 'sqlite:///./temp.db', index_col='Id')
+    df = df.reset_index()
+    # Add an index with the Dask `index` method
+    # df = df.compute()
+    
+    # df = dd_df.compute()
+    
     return df
 
-def cacheTable(df: pd.DataFrame, tableName: str, conn, tableCreated: bool = False):
-    if tableCreated == False:
-        c = conn.cursor()
-        # columns = df.columns.tolist()
-        # create_table_query = f"CREATE TABLE {tableName} ({', '.join([f'{col} TEXT' for col in columns])});"
-        #c.execute(create_table_query)
-    df.to_sql(tableName, conn, if_exists='append', index=False)
+def cacheTable(df, tableName: str, conn, tableCreated: bool = False):
+    # if tableCreated == False:
+    #     c = conn.cursor()
+    #     # columns = df.columns.tolist()
+    #     # create_table_query = f"CREATE TABLE {tableName} ({', '.join([f'{col} TEXT' for col in columns])});"
+    #     #c.execute(create_table_query)
+    df.to_sql(tableName, 'sqlite:///./temp.db', if_exists='append', index=False)
     
 
 def DataFrame(tableID:str, name:str=None, limit:int=None, dataFilter:str=None, customFilter:str=None, cache:bool=False) -> pd.DataFrame:
     """
     Return a Pandas DataFrame containing the data from the CBS OData API.
-    
+
     Parameters
     ----------
     tableID : str
@@ -97,7 +104,7 @@ def DataFrame(tableID:str, name:str=None, limit:int=None, dataFilter:str=None, c
         If not specified, no filter will be applied.
     cache : bool, optional
         Whether or not to cache the DataFrame, by default False.
-    
+
     Returns
     -------
     Pandas DataFrame
@@ -105,7 +112,7 @@ def DataFrame(tableID:str, name:str=None, limit:int=None, dataFilter:str=None, c
     """
     
     tablename = tableName(tableID, name, dataFilter, limit)
-    
+
     # check for cached version if cache is True
     if cache:
         try:
@@ -114,12 +121,17 @@ def DataFrame(tableID:str, name:str=None, limit:int=None, dataFilter:str=None, c
         except:
             pass
     # get data
-
+    conn = sqlite3.connect('./temp.db')
+    conn.close()
     if name == None:
         df = fullDataset(tableID, limit, dataFilter, customFilter)
     else:
-        df = pd.DataFrame(specificTable(tableID, name, limit, dataFilter, customFilter))
-
+        df = specificTable(tableID, name, limit, dataFilter, customFilter)
+    # remove temp.db file
+    try:
+        os.remove('./temp.db')
+    except FileNotFoundError:
+        pass
     # if cache is true, check if cache folder exists, otherwise create it
     if cache:
         if not os.path.exists("./cache"):
@@ -137,35 +149,42 @@ def fullDataset(tableID:str, limit:int=None, dataFilter:str=None, customFilter:s
     if customFilter is not None:
         typefilter = customFilter['type']
         filtervalue = customFilter['filterValue']
-        df_type = df = pd.DataFrame(specificTable(tableID, typefilter))
+        df_type = specificTable(tableID, typefilter)
         dataFilterValues = df_type.loc[df_type["Identifier"].str.contains(filtervalue), "Identifier"].values
         dataFilterlist = [f"RegioS eq '{val}'" for val in dataFilterValues]
-        conn = sqlite3.connect('./temp.db')
+        # conn = sqlite3.connect('./temp.db')
+        
         sys.stdout.write(f'Totaal aantal soorten op basis van filter {len(dataFilterlist)}')
         sys.stdout.write('\n')
+        dfs = []
         with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
             futures = {executor.submit(getData, targetUrl(tableID, "Observations", limit, filter)): i for i, filter in enumerate(dataFilterlist)}
             for i, future in enumerate(concurrent.futures.as_completed(futures)):
                 statusPrint(len(dataFilterlist), i)
-                try:
-                    df = future.result()
-                    tableCreated = True if i > 0 else False
-                    cacheTable(df, 'data_table', conn, tableCreated)
-                except Exception as e:
-                    print(f"Error processing filter {i}: {e}")
-        # Instead of using pandas.read_sql to read the entire table into memory,
-        # use dask.dataframe.read_sql to read it in chunks.
-        # query = f"SELECT * FROM data_table"
-        # query = sqlalchemy.table("data_table", sqlalchemy.column("*"))
-        df = dd.read_sql_table('data_table', 'sqlite:///./temp.db', index_col='Id')
+                # try:
+                df = future.result()
+                # Append each dataframe to the list and then use dask's `compute` method to combine them into a single dataframe
+                dfs.append(df)
+                # except Exception as e:
+                #     print(f"Error processing filter {i+1}: {e}")
+                
+                tableCreated = True if i > 0 else False
+
+                # cacheTable(df, 'data_table', 'sqlite:///./temp.db', tableCreated)
+                # except Exception as e:
+                #     print(f"Error processing filter {i}: {e}")
+            
+        df = dd.concat(dfs)
+            
+        # df = dd.read_sql_table('data_table', 'sqlite:///./temp.db', index_col='Id')
         # df = df.compute()
     else:
         df = getData(targetUrl(tableID, "Observations", limit, dataFilter))
-    
+
     availableDimTables = [df['name'] for df in requests.get(f"{basic_odata_url}{tableID}").json()['value']]
     codeDimTables = [dtable for dtable in availableDimTables if dtable.endswith("Codes")]
     groupDimTables = [dtable for dtable in availableDimTables if dtable.endswith("Groups") and dtable not in ['PeriodenGroups', 'RegioSGroups']]
-    
+
     for column in codeDimTables+groupDimTables:
         try:
             dimTable = getData(targetUrl(tableID, column))
@@ -173,11 +192,11 @@ def fullDataset(tableID:str, limit:int=None, dataFilter:str=None, customFilter:s
             continue
         dimTable = dimTable.drop(columns=["Index", "Description"])
         if column.endswith("Codes"): # Codes are used to map to a specific dimensions
-            for col in dimTable.columns: 
+            for col in dimTable.columns:
                 if col.lower().endswith('id'):
                     dimTable.rename(columns={col:f'{column.replace("Codes", "")}Id'}, inplace=True)
             dimTable.rename(columns={"Identifier": column.replace("Codes", "")}, inplace=True)
-            df = pd.merge(df, dimTable, on=column.replace("Codes", ""))
+            df = df.merge(dimTable, on=column.replace("Codes", ""))
             df = df.rename(columns={"Title": f"{column}Title"})
         elif column.endswith("Groups"): # Groups are used to create a hierarchy
             parents_list = []
@@ -187,7 +206,7 @@ def fullDataset(tableID:str, limit:int=None, dataFilter:str=None, customFilter:s
             dimTable[f'{column.replace("Groups", "")}parents'] = parents_list
             dimTable.rename(columns={'Id':f'{column}MergeId'}, inplace=True)
             columndfMerge = [col for col in df.columns if col.lower().endswith('id') and col.startswith(column.replace("Groups", ""))][0]
-            df = pd.merge(df, dimTable, left_on=columndfMerge, right_on=f'{column}MergeId', how='left')
+            df = df.merge(dimTable, left_on=columndfMerge, right_on=f'{column}MergeId', how='left')
             df = df.rename(columns={"Title": f"{column}Title"})
         if column.startswith("Wijken"):
             df = df.rename(columns={column: "RegioCode"})
@@ -202,11 +221,11 @@ def fullDataset(tableID:str, limit:int=None, dataFilter:str=None, customFilter:s
     df = df[columnsToKeep]
 
     # replace 'Codes','Groups' and 'Title' in columnnames
-    df.columns = [col.replace('CodesTitle', '').replace("GroupsTitle", "Category") for col in df.columns] 
+    df.columns = [col.replace('CodesTitle', '').replace("GroupsTitle", "Category") for col in df.columns]
 
     # lowercase all columnnames
     df.columns  = [col.lower() for col in df.columns]
-    
+
     return df
 
 def specificTable(tableID:str, name:str, limit:int=None, dataFilter:str=None):
@@ -220,7 +239,7 @@ def specificTable(tableID:str, name:str, limit:int=None, dataFilter:str=None):
     if name != "/Observations":
         df = getData(targetUrl(tableID, name, limit, dataFilter))
     else:
-        df = getData(targetUrl(tableID, name, limit, dataFilter), tableLengthObservations(tableID))
+        df = getData(targetUrl(tableID, name, limit, dataFilter)) # , tableLengthObservations(tableID))
     return df
 
 def tableName(tableID:str, name:str, dataFilter:str, limit:int):
