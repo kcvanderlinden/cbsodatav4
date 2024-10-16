@@ -3,7 +3,6 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util import Retry
 import os
-import sqlite3
 import sys
 import concurrent.futures
 import json
@@ -26,15 +25,11 @@ def cbsConnect(target_url:str):
         try:
             response = session.get(target_url)
             if response.status_code == 200:
-                # for chunk in response.iter_lines(decode_unicode=True):
-                #     row = json.loads(chunk)
-                #     data.append(row)
-                #  # Raise an exception for bad status codes
                 data = response.json()  # Load the JSON data directly from the response object
             else:
                 raise requests.exceptions.RequestException(f"HTTP {response.status_code}")
         except requests.exceptions.ChunkedEncodingError:
-            print(f"ChunkedEncodingError occurred. Retrying...")
+            print(f"ChunkedEncodingError occurred (data load incomplete). Retrying...")
             retry_count += 1
             if retry_count == 5:
                 raise requests.exceptions.ChunkedEncodingError("Max retries exceeded")
@@ -50,40 +45,23 @@ def getData(target_url:str) -> pd.DataFrame:
     target_url: str, the URL to get the data from
     tableLength: int, the number of rows in the table
     '''
-    # conn = sqlite3.connect('./temp.db')
     pages_read = 0
     nextPage = True
+    dfs = []
     while nextPage:
         response = cbsConnect(target_url)
         nextPage = True if "@odata.nextLink" in response else False
         df = dd.from_pandas(pd.DataFrame(response['value']), npartitions=1)
         df = df.compute() # Compute the dataframe to trigger the computation
-        # df = dd_df.drop_duplicates().compute()
         if not nextPage and pages_read == 0:
             return df
         else:
-            cacheTable(df, 'loop_data', 'sqlite:///./temp.db', pages_read > 0)
+            dfs.append(df)
             pages_read += 1
             nextPage = True if "@odata.nextLink" in response else False
             target_url = response["@odata.nextLink"] if nextPage else None
-    # df = pd.read_sql('SELECT * FROM loop_data', conn)
-    df = dd.read_sql_table('loop_data', 'sqlite:///./temp.db', index_col='Id')
-    df = df.reset_index()
-    # Add an index with the Dask `index` method
-    # df = df.compute()
-    
-    # df = dd_df.compute()
-    
+    df = dd.concat(dfs)
     return df
-
-def cacheTable(df, tableName: str, conn, tableCreated: bool = False):
-    # if tableCreated == False:
-    #     c = conn.cursor()
-    #     # columns = df.columns.tolist()
-    #     # create_table_query = f"CREATE TABLE {tableName} ({', '.join([f'{col} TEXT' for col in columns])});"
-    #     #c.execute(create_table_query)
-    df.to_sql(tableName, 'sqlite:///./temp.db', if_exists='append', index=False)
-    
 
 def DataFrame(tableID:str, name:str=None, limit:int=None, dataFilter:str=None, customFilter:str=None, cache:bool=False) -> pd.DataFrame:
     """
@@ -120,18 +98,11 @@ def DataFrame(tableID:str, name:str=None, limit:int=None, dataFilter:str=None, c
             return df
         except:
             pass
-    # get data
-    conn = sqlite3.connect('./temp.db')
-    conn.close()
+
     if name == None:
         df = fullDataset(tableID, limit, dataFilter, customFilter)
     else:
         df = specificTable(tableID, name, limit, dataFilter, customFilter)
-    # remove temp.db file
-    try:
-        os.remove('./temp.db')
-    except FileNotFoundError:
-        pass
     # if cache is true, check if cache folder exists, otherwise create it
     if cache:
         if not os.path.exists("./cache"):
@@ -152,8 +123,6 @@ def fullDataset(tableID:str, limit:int=None, dataFilter:str=None, customFilter:s
         df_type = specificTable(tableID, typefilter)
         dataFilterValues = df_type.loc[df_type["Identifier"].str.contains(filtervalue), "Identifier"].values
         dataFilterlist = [f"RegioS eq '{val}'" for val in dataFilterValues]
-        # conn = sqlite3.connect('./temp.db')
-        
         sys.stdout.write(f'Totaal aantal soorten op basis van filter {len(dataFilterlist)}')
         sys.stdout.write('\n')
         dfs = []
@@ -161,23 +130,13 @@ def fullDataset(tableID:str, limit:int=None, dataFilter:str=None, customFilter:s
             futures = {executor.submit(getData, targetUrl(tableID, "Observations", limit, filter)): i for i, filter in enumerate(dataFilterlist)}
             for i, future in enumerate(concurrent.futures.as_completed(futures)):
                 statusPrint(len(dataFilterlist), i)
-                # try:
-                df = future.result()
-                # Append each dataframe to the list and then use dask's `compute` method to combine them into a single dataframe
-                dfs.append(df)
-                # except Exception as e:
-                #     print(f"Error processing filter {i+1}: {e}")
-                
-                tableCreated = True if i > 0 else False
-
-                # cacheTable(df, 'data_table', 'sqlite:///./temp.db', tableCreated)
-                # except Exception as e:
-                #     print(f"Error processing filter {i}: {e}")
-            
+                try:
+                    df = future.result()
+                    # Append each dataframe to the list and then use dask's `compute` method to combine them into a single dataframe
+                    dfs.append(df)
+                except Exception as e:
+                    print(f"Error processing filter {i+1}: {e}")     
         df = dd.concat(dfs)
-            
-        # df = dd.read_sql_table('data_table', 'sqlite:///./temp.db', index_col='Id')
-        # df = df.compute()
     else:
         df = getData(targetUrl(tableID, "Observations", limit, dataFilter))
 
@@ -304,9 +263,8 @@ def get_parents(row:str, df: pd.DataFrame):
     return '|'.join(parentTitles[::-1])
 
 def statusPrint(totalAmount:int, currentAmount:int):
-    max_width_bar = 30
-    width_bar = totalAmount if totalAmount <= max_width_bar else max_width_bar
-    progress_in_bar = totalAmount / width_bar
+    current_percentage = int((currentAmount +1) / totalAmount * 100)
+    current_bar = int((currentAmount +1) / totalAmount * 10)
     sys.stdout.write('\r')
-    sys.stdout.write(f"[%-{progress_in_bar}s] %d%%" % ('='*(currentAmount+1), (currentAmount+1)/totalAmount*100))
+    sys.stdout.write(f"[%-{10}s] %d%%" % ('='*(current_bar), current_percentage))
     sys.stdout.flush()
