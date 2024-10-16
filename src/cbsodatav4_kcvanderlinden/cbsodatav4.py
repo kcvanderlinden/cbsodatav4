@@ -7,6 +7,9 @@ import sys
 import concurrent.futures
 import json
 import dask.dataframe as dd
+from dask.distributed import Client
+
+client = Client()
 
 basic_odata_url = 'https://datasets.cbs.nl/odata/v1/CBS/'
 
@@ -52,7 +55,7 @@ def getData(target_url:str) -> pd.DataFrame:
         response = cbsConnect(target_url)
         nextPage = True if "@odata.nextLink" in response else False
         df = dd.from_pandas(pd.DataFrame(response['value']), npartitions=1)
-        df = df.compute() # Compute the dataframe to trigger the computation
+        # df = client.persist(df) # Compute the dataframe to trigger the computation
         if not nextPage and pages_read == 0:
             return df
         else:
@@ -121,7 +124,9 @@ def fullDataset(tableID:str, limit:int=None, dataFilter:str=None, customFilter:s
         typefilter = customFilter['type']
         filtervalue = customFilter['filterValue']
         df_type = specificTable(tableID, typefilter)
-        dataFilterValues = df_type.loc[df_type["Identifier"].str.contains(filtervalue), "Identifier"].values
+        df_type.compute()
+        dataFilterValues = df_type.loc[df_type["Identifier"].str.contains(filtervalue), "Identifier"].values.compute()
+        
         dataFilterlist = [f"RegioS eq '{val}'" for val in dataFilterValues]
         sys.stdout.write(f'Totaal aantal soorten op basis van filter {len(dataFilterlist)}')
         sys.stdout.write('\n')
@@ -153,17 +158,20 @@ def fullDataset(tableID:str, limit:int=None, dataFilter:str=None, customFilter:s
         if column.endswith("Codes"): # Codes are used to map to a specific dimensions
             for col in dimTable.columns:
                 if col.lower().endswith('id'):
-                    dimTable.rename(columns={col:f'{column.replace("Codes", "")}Id'}, inplace=True)
-            dimTable.rename(columns={"Identifier": column.replace("Codes", "")}, inplace=True)
+                    dimTable = dimTable.rename(columns={col:f'{column.replace("Codes", "")}Id'})
+            dimTable = dimTable.rename(columns={"Identifier": column.replace("Codes", "")})
             df = df.merge(dimTable, on=column.replace("Codes", ""))
             df = df.rename(columns={"Title": f"{column}Title"})
         elif column.endswith("Groups"): # Groups are used to create a hierarchy
             parents_list = []
+            dimTable.compute()
             for index, row in dimTable.iterrows():
                 parents = get_parents(row, dimTable)
                 parents_list.append(parents)
+            print(parents_list)
+            # dask way => df = df.rename(columns=dict(zip(df.columns, new_columns)))
             dimTable[f'{column.replace("Groups", "")}parents'] = parents_list
-            dimTable.rename(columns={'Id':f'{column}MergeId'}, inplace=True)
+            dimTable = dimTable.rename(columns={'Id':f'{column}MergeId'})
             columndfMerge = [col for col in df.columns if col.lower().endswith('id') and col.startswith(column.replace("Groups", ""))][0]
             df = df.merge(dimTable, left_on=columndfMerge, right_on=f'{column}MergeId', how='left')
             df = df.rename(columns={"Title": f"{column}Title"})
@@ -254,10 +262,10 @@ def get_parents(row:str, df: pd.DataFrame):
     parent = row['ParentId']
     parentTitles = []
     while parent is not None:
-        p = df[df['Id'] == parent]
-        if not p.empty:
-            parentTitles.append(p.iloc[0]['Title'])
-            parent = p.iloc[0]['ParentId']
+        p = df[df['Id'] == parent].reset_index()
+        if p.index.compute().stop > 0:
+            parentTitles.append(p['Title'].compute()[0])
+            parent = p['ParentId'].compute()[0]
         else:
             break
     return '|'.join(parentTitles[::-1])
