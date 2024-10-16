@@ -8,6 +8,7 @@ import concurrent.futures
 import json
 import dask.dataframe as dd
 from dask.distributed import Client
+import dask
 
 client = Client()
 
@@ -168,9 +169,8 @@ def fullDataset(tableID:str, limit:int=None, dataFilter:str=None, customFilter:s
             for index, row in dimTable.iterrows():
                 parents = get_parents(row, dimTable)
                 parents_list.append(parents)
-            print(parents_list)
             # dask way => df = df.rename(columns=dict(zip(df.columns, new_columns)))
-            dimTable[f'{column.replace("Groups", "")}parents'] = parents_list
+            dimTable[f'{column.replace("Groups", "")}parents'] = dask.array.from_array(parents_list)
             dimTable = dimTable.rename(columns={'Id':f'{column}MergeId'})
             columndfMerge = [col for col in df.columns if col.lower().endswith('id') and col.startswith(column.replace("Groups", ""))][0]
             df = df.merge(dimTable, left_on=columndfMerge, right_on=f'{column}MergeId', how='left')
