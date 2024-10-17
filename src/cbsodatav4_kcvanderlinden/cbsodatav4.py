@@ -7,10 +7,9 @@ import sys
 import concurrent.futures
 import json
 import dask.dataframe as dd
-from dask.distributed import Client
 import dask
-
-client = Client()
+import random
+from time import sleep
 
 basic_odata_url = 'https://datasets.cbs.nl/odata/v1/CBS/'
 
@@ -25,25 +24,28 @@ def cbsConnect(target_url:str):
     session.mount('https://', HTTPAdapter(max_retries=retries))
     retry_count = 0
     data = []
+    time_out_time = 0
     while True:
         try:
             response = session.get(target_url)
             if response.status_code == 200:
                 data = response.json()  # Load the JSON data directly from the response object
+                return data
             else:
                 raise requests.exceptions.RequestException(f"HTTP {response.status_code}")
         except requests.exceptions.ChunkedEncodingError:
             print(f"ChunkedEncodingError occurred (data load incomplete). Retrying...")
             retry_count += 1
+            time_out_time += random.randrange(1, 10)/10
+            sleep(time_out_time)
             if retry_count == 5:
                 raise requests.exceptions.ChunkedEncodingError("Max retries exceeded")
         except json.JSONDecodeError as e:
             print(f"JSON decode error: {e}. Retrying...")
         else:
             break
-    return data
 
-def getData(target_url:str) -> pd.DataFrame:
+def getData(target_url:str):
     '''
     Get the data from the target URL.
     target_url: str, the URL to get the data from
@@ -63,11 +65,16 @@ def getData(target_url:str) -> pd.DataFrame:
             dfs.append(df)
             pages_read += 1
             nextPage = True if "@odata.nextLink" in response else False
-            target_url = response["@odata.nextLink"] if nextPage else None
+            target_url = response["@odata.nextLink"] if nextPage else target_url
     df = dd.concat(dfs)
+    if 'Observations' in target_url: #reduce memory usage by limiting size
+        df = df.astype({
+            'Id': 'int32',
+            'Value': 'float32'
+        })
     return df
 
-def DataFrame(tableID:str, name:str=None, limit:int=None, dataFilter:str=None, customFilter:str=None, cache:bool=False) -> pd.DataFrame:
+def DataFrame(tableID:str, name:str=None, limit:int=None, dataFilter:str=None, customFilter:str=None, cache:bool=False):
     """
     Return a Pandas DataFrame containing the data from the CBS OData API.
 
@@ -114,7 +121,7 @@ def DataFrame(tableID:str, name:str=None, limit:int=None, dataFilter:str=None, c
         df.to_csv(f"./cache/{tablename}.csv", index=False)
     return df
 
-def fullDataset(tableID:str, limit:int=None, dataFilter:str=None, customFilter:str=None) -> pd.DataFrame:
+def fullDataset(tableID:str, limit:int=None, dataFilter:str=None, customFilter:str=None):
     '''
     Get the full dataset of a table, including all codes
     tableID: str, the table ID of the dataset
@@ -125,14 +132,14 @@ def fullDataset(tableID:str, limit:int=None, dataFilter:str=None, customFilter:s
         typefilter = customFilter['type']
         filtervalue = customFilter['filterValue']
         df_type = specificTable(tableID, typefilter)
-        df_type.compute()
+        # df_type.compute()
         dataFilterValues = df_type.loc[df_type["Identifier"].str.contains(filtervalue), "Identifier"].values.compute()
         
         dataFilterlist = [f"RegioS eq '{val}'" for val in dataFilterValues]
         sys.stdout.write(f'Totaal aantal soorten op basis van filter {len(dataFilterlist)}')
         sys.stdout.write('\n')
         dfs = []
-        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
             futures = {executor.submit(getData, targetUrl(tableID, "Observations", limit, filter)): i for i, filter in enumerate(dataFilterlist)}
             for i, future in enumerate(concurrent.futures.as_completed(futures)):
                 statusPrint(len(dataFilterlist), i)
@@ -143,11 +150,12 @@ def fullDataset(tableID:str, limit:int=None, dataFilter:str=None, customFilter:s
                 except Exception as e:
                     print(f"Error processing filter {i+1}: {e}")     
         df = dd.concat(dfs)
+        df = df.repartition(npartitions=4)
     else:
         df = getData(targetUrl(tableID, "Observations", limit, dataFilter))
 
     availableDimTables = [df['name'] for df in requests.get(f"{basic_odata_url}{tableID}").json()['value']]
-    codeDimTables = [dtable for dtable in availableDimTables if dtable.endswith("Codes")]
+    codeDimTables = [dtable for dtable in availableDimTables if dtable.endswith("Codes") and dtable not in ['RegioSCodes']]
     groupDimTables = [dtable for dtable in availableDimTables if dtable.endswith("Groups") and dtable not in ['PeriodenGroups', 'RegioSGroups']]
 
     for column in codeDimTables+groupDimTables:
@@ -165,7 +173,7 @@ def fullDataset(tableID:str, limit:int=None, dataFilter:str=None, customFilter:s
             df = df.rename(columns={"Title": f"{column}Title"})
         elif column.endswith("Groups"): # Groups are used to create a hierarchy
             parents_list = []
-            dimTable.compute()
+            # dimTable.compute()
             for index, row in dimTable.iterrows():
                 parents = get_parents(row, dimTable)
                 parents_list.append(parents)
@@ -181,7 +189,7 @@ def fullDataset(tableID:str, limit:int=None, dataFilter:str=None, customFilter:s
             df['RegioCode'] = df['WijkenEnBuurten']
         if column.lower().endswith("regioscodes"):
             df[column] = df[column.replace("Codes", "")].copy()
-    standardColumns =  ['Id','Value', 'ValueAttribute', 'StringValue','RegioSCodes', 'Parents', 'GemeenteCode', 'RegioCode']
+    standardColumns =  ['Id','Value', 'ValueAttribute', 'StringValue','RegioS', 'Parents', 'GemeenteCode', 'RegioCode']
     columnsToKeep = [col for col in df.columns if col in standardColumns]
     columnsToKeep += [col for col in df.columns if col.endswith('Title')]
     columnsToKeep += [col for col in df.columns if col.endswith('parents')]
@@ -192,6 +200,8 @@ def fullDataset(tableID:str, limit:int=None, dataFilter:str=None, customFilter:s
 
     # lowercase all columnnames
     df.columns  = [col.lower() for col in df.columns]
+
+    
 
     return df
 
@@ -253,7 +263,7 @@ def targetUrl(tableID:str, name:str, limit:int=None, dataFilter:str=None):
 
     return target_url
 
-def get_parents(row:str, df: pd.DataFrame):
+def get_parents(row:str, df:dd):
     '''
     this function returns the titles of all parents of a row in a dataframe.
     row: str, the id of a row in a dataframe
