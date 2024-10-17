@@ -10,6 +10,17 @@ import dask.dataframe as dd
 import dask
 import random
 from time import sleep
+# from dask.distributed import Client
+
+# with dask.config.set({"distributed.scheduler.worker-saturation":  .2
+#                       , "distributed.worker.memory_limit": "4 GiB"
+#                       , "distributed.worker.memory.target": 0.60
+#                       }): # notice 1. is  not a str
+#     client = Client()
+from dask.distributed import LocalCluster
+cluster = LocalCluster(processes=True, # notice this line
+                           n_workers=1,
+                           memory_limit="2 GiB")
 
 basic_odata_url = 'https://datasets.cbs.nl/odata/v1/CBS/'
 
@@ -45,7 +56,7 @@ def cbsConnect(target_url:str):
         else:
             break
 
-def getData(target_url:str):
+def getData(target_url:str, return_data = False):
     '''
     Get the data from the target URL.
     target_url: str, the URL to get the data from
@@ -53,26 +64,33 @@ def getData(target_url:str):
     '''
     pages_read = 0
     nextPage = True
-    dfs = []
+    dicts = []
+    hex_target_url = ''.join(format(ord(c), 'x') for c in target_url)[-20:]
     while nextPage:
         response = cbsConnect(target_url)
         nextPage = True if "@odata.nextLink" in response else False
-        df = dd.from_pandas(pd.DataFrame(response['value']), npartitions=1)
+        # df = dd.from_pandas(pd.DataFrame(response['value']), npartitions=1)
         # df = client.persist(df) # Compute the dataframe to trigger the computation
         if not nextPage and pages_read == 0:
-            return df
+            dicts += response['value']
         else:
-            dfs.append(df)
+            dicts += response['value']
             pages_read += 1
             nextPage = True if "@odata.nextLink" in response else False
             target_url = response["@odata.nextLink"] if nextPage else target_url
-    df = dd.concat(dfs)
-    if 'Observations' in target_url: #reduce memory usage by limiting size
-        df = df.astype({
-            'Id': 'int32',
-            'Value': 'float32'
-        })
-    return df
+    # df = dd.concat(dfs)
+    # if 'Observations' in target_url: #reduce memory usage by limiting size
+    #     df = df.astype({
+    #         'Id': 'int32',
+    #         'Value': 'float32'
+    #     })
+    if return_data:
+        return response['value']
+    else:
+        if not os.path.exists("./temporary_json"):
+            os.makedirs("./temporary_json")
+        with open(f'.\\temporary_json\\{hex_target_url}.json', 'w', encoding='utf-8') as f:
+            json.dump(dicts, f, ensure_ascii=False, indent=4)
 
 def DataFrame(tableID:str, name:str=None, limit:int=None, dataFilter:str=None, customFilter:str=None, cache:bool=False):
     """
@@ -132,25 +150,30 @@ def fullDataset(tableID:str, limit:int=None, dataFilter:str=None, customFilter:s
         typefilter = customFilter['type']
         filtervalue = customFilter['filterValue']
         df_type = specificTable(tableID, typefilter)
-        # df_type.compute()
+        df_type = dd.from_pandas(pd.DataFrame(df_type), npartitions=1)
         dataFilterValues = df_type.loc[df_type["Identifier"].str.contains(filtervalue), "Identifier"].values.compute()
         
         dataFilterlist = [f"RegioS eq '{val}'" for val in dataFilterValues]
         sys.stdout.write(f'Totaal aantal soorten op basis van filter {len(dataFilterlist)}')
         sys.stdout.write('\n')
-        dfs = []
         with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
             futures = {executor.submit(getData, targetUrl(tableID, "Observations", limit, filter)): i for i, filter in enumerate(dataFilterlist)}
             for i, future in enumerate(concurrent.futures.as_completed(futures)):
                 statusPrint(len(dataFilterlist), i)
                 try:
-                    df = future.result()
+                    
                     # Append each dataframe to the list and then use dask's `compute` method to combine them into a single dataframe
-                    dfs.append(df)
+                    future.result()
                 except Exception as e:
-                    print(f"Error processing filter {i+1}: {e}")     
-        df = dd.concat(dfs)
-        df = df.repartition(npartitions=4)
+                    print(f"Error processing filter {i+1}: {e}")
+
+        df = dd.read_json(
+            get_json_files(), 
+            blocksize=None, orient="records", 
+            lines=False
+            ) 
+        # Remove folder and its content of temporary_json
+        # delete_json_files()
     else:
         df = getData(targetUrl(tableID, "Observations", limit, dataFilter))
 
@@ -160,16 +183,22 @@ def fullDataset(tableID:str, limit:int=None, dataFilter:str=None, customFilter:s
 
     for column in codeDimTables+groupDimTables:
         try:
-            dimTable = getData(targetUrl(tableID, column))
+            dimTable = getData(targetUrl(tableID, column), return_data=True)
+            dimTable = dd.from_pandas(pd.DataFrame(dimTable), npartitions=1)
+            
         except:
             continue
         dimTable = dimTable.drop(columns=["Index", "Description"])
         if column.endswith("Codes"): # Codes are used to map to a specific dimensions
+            merge_key = column.replace("Codes", "")
             for col in dimTable.columns:
                 if col.lower().endswith('id'):
-                    dimTable = dimTable.rename(columns={col:f'{column.replace("Codes", "")}Id'})
-            dimTable = dimTable.rename(columns={"Identifier": column.replace("Codes", "")})
-            df = df.merge(dimTable, on=column.replace("Codes", ""))
+                    dimTable = dimTable.rename(columns={col:f'{merge_key}Id'})
+            dimTable = dimTable.rename(columns={"Identifier": merge_key})
+            df = df.astype({
+                merge_key : 'string[pyarrow]'
+            })
+            df = df.merge(dimTable, on=merge_key, how='left')
             df = df.rename(columns={"Title": f"{column}Title"})
         elif column.endswith("Groups"): # Groups are used to create a hierarchy
             parents_list = []
@@ -214,9 +243,9 @@ def specificTable(tableID:str, name:str, limit:int=None, dataFilter:str=None):
     dataFilter: str, the filter to apply to the data
     '''
     if name != "/Observations":
-        df = getData(targetUrl(tableID, name, limit, dataFilter))
+        df = getData(targetUrl(tableID, name, limit, dataFilter), return_data=True)
     else:
-        df = getData(targetUrl(tableID, name, limit, dataFilter)) # , tableLengthObservations(tableID))
+        df = getData(targetUrl(tableID, name, limit, dataFilter), return_data=True) # , tableLengthObservations(tableID))
     return df
 
 def tableName(tableID:str, name:str, dataFilter:str, limit:int):
@@ -286,3 +315,24 @@ def statusPrint(totalAmount:int, currentAmount:int):
     sys.stdout.write('\r')
     sys.stdout.write(f"[%-{10}s] %d%%" % ('='*(current_bar), current_percentage))
     sys.stdout.flush()
+
+def get_json_files():
+    '''
+    Get a list of all .json files in the ./cache folder.
+    '''
+    json_files = []
+    for filename in os.listdir("./temporary_json"):
+        if filename.endswith(".json"):
+            json_files.append(f'./temporary_json/{filename}')
+    return json_files
+
+def delete_json_files():
+    '''
+    Delete all .json files in the ./cache folder.
+    '''
+    for filename in os.listdir("./temporary_json"):
+        if filename.endswith(".json"):
+            os.remove(os.path.join("./temporary_json", filename))
+    print("All .json files deleted from ./cache folder")
+
+# ... rest of the code remains the same ...
