@@ -10,13 +10,6 @@ import dask.dataframe as dd
 import dask
 import random
 from time import sleep
-# from dask.distributed import Client
-
-# with dask.config.set({"distributed.scheduler.worker-saturation":  .2
-#                       , "distributed.worker.memory_limit": "4 GiB"
-#                       , "distributed.worker.memory.target": 0.60
-#                       }): # notice 1. is  not a str
-#     client = Client()
 from dask.distributed import LocalCluster
 cluster = LocalCluster(processes=True, # notice this line
                            n_workers=1,
@@ -47,7 +40,7 @@ def cbsConnect(target_url:str):
         except requests.exceptions.ChunkedEncodingError:
             print(f"ChunkedEncodingError occurred (data load incomplete). Retrying...")
             retry_count += 1
-            time_out_time += random.randrange(1, 10)/10
+            time_out_time += random.randrange(1, 10)/10 # dynamic time-out after unstable connection with host.
             sleep(time_out_time)
             if retry_count == 5:
                 raise requests.exceptions.ChunkedEncodingError("Max retries exceeded")
@@ -69,8 +62,6 @@ def getData(target_url:str, return_data = False):
     while nextPage:
         response = cbsConnect(target_url)
         nextPage = True if "@odata.nextLink" in response else False
-        # df = dd.from_pandas(pd.DataFrame(response['value']), npartitions=1)
-        # df = client.persist(df) # Compute the dataframe to trigger the computation
         if not nextPage and pages_read == 0:
             dicts += response['value']
         else:
@@ -78,21 +69,16 @@ def getData(target_url:str, return_data = False):
             pages_read += 1
             nextPage = True if "@odata.nextLink" in response else False
             target_url = response["@odata.nextLink"] if nextPage else target_url
-    # df = dd.concat(dfs)
-    # if 'Observations' in target_url: #reduce memory usage by limiting size
-    #     df = df.astype({
-    #         'Id': 'int32',
-    #         'Value': 'float32'
-    #     })
     if return_data:
         return response['value']
     else:
         if not os.path.exists("./temporary_json"):
             os.makedirs("./temporary_json")
+        # write every page to json is easier on the system memory and a little more demanding on the disk space
         with open(f'.\\temporary_json\\{hex_target_url}.json', 'w', encoding='utf-8') as f:
             json.dump(dicts, f, ensure_ascii=False, indent=4)
 
-def DataFrame(tableID:str, name:str=None, limit:int=None, dataFilter:str=None, customFilter:str=None, cache:bool=False):
+def DataFrame(tableID:str, name:str=None, limit:int=None, dataFilter:str=None, customFilter:str=None, save_csv_dir:str=None):
     """
     Return a Pandas DataFrame containing the data from the CBS OData API.
 
@@ -109,8 +95,8 @@ def DataFrame(tableID:str, name:str=None, limit:int=None, dataFilter:str=None, c
     dataFilter : str, optional
         A filter to apply to the data, by default None.
         If not specified, no filter will be applied.
-    cache : bool, optional
-        Whether or not to cache the DataFrame, by default False.
+    save_csv_dir : str, optional
+        if not None, save the csv file to the specified directory.
 
     Returns
     -------
@@ -120,23 +106,15 @@ def DataFrame(tableID:str, name:str=None, limit:int=None, dataFilter:str=None, c
     
     tablename = tableName(tableID, name, dataFilter, limit)
 
-    # check for cached version if cache is True
-    if cache:
-        try:
-            df = pd.read_csv(f"./cache/{tablename}.csv")
-            return df
-        except:
-            pass
-
     if name == None:
         df = fullDataset(tableID, limit, dataFilter, customFilter)
     else:
         df = specificTable(tableID, name, limit, dataFilter, customFilter)
     # if cache is true, check if cache folder exists, otherwise create it
-    if cache:
-        if not os.path.exists("./cache"):
-            os.makedirs("./cache")
-        df.to_csv(f"./cache/{tablename}.csv", index=False)
+    if save_csv_dir is not None:
+        df.to_csv(f"{save_csv_dir}/{tablename}.csv", index=False, single_file=True)
+    df = df.compute()
+    delete_json_files()
     return df
 
 def fullDataset(tableID:str, limit:int=None, dataFilter:str=None, customFilter:str=None):
@@ -172,8 +150,6 @@ def fullDataset(tableID:str, limit:int=None, dataFilter:str=None, customFilter:s
             blocksize=None, orient="records", 
             lines=False
             ) 
-        # Remove folder and its content of temporary_json
-        # delete_json_files()
     else:
         df = getData(targetUrl(tableID, "Observations", limit, dataFilter))
 
@@ -202,11 +178,9 @@ def fullDataset(tableID:str, limit:int=None, dataFilter:str=None, customFilter:s
             df = df.rename(columns={"Title": f"{column}Title"})
         elif column.endswith("Groups"): # Groups are used to create a hierarchy
             parents_list = []
-            # dimTable.compute()
             for index, row in dimTable.iterrows():
                 parents = get_parents(row, dimTable)
                 parents_list.append(parents)
-            # dask way => df = df.rename(columns=dict(zip(df.columns, new_columns)))
             dimTable[f'{column.replace("Groups", "")}parents'] = dask.array.from_array(parents_list)
             dimTable = dimTable.rename(columns={'Id':f'{column}MergeId'})
             columndfMerge = [col for col in df.columns if col.lower().endswith('id') and col.startswith(column.replace("Groups", ""))][0]
@@ -334,5 +308,3 @@ def delete_json_files():
         if filename.endswith(".json"):
             os.remove(os.path.join("./temporary_json", filename))
     print("All .json files deleted from ./cache folder")
-
-# ... rest of the code remains the same ...
