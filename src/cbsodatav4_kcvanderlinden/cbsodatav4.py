@@ -75,7 +75,7 @@ def getData(target_url:str, return_data = False):
         if not os.path.exists("./temporary_json"):
             os.makedirs("./temporary_json")
         # write every page to json is easier on the system memory and a little more demanding on the disk space
-        with open(f'.\\temporary_json\\{hex_target_url}.json', 'w', encoding='utf-8') as f:
+        with open(f'./temporary_json/{hex_target_url}.json', 'w', encoding='utf-8') as f:
             json.dump(dicts, f, ensure_ascii=False, indent=4)
 
 def DataFrame(tableID:str, name:str=None, limit:int=None, dataFilter:str=None, customFilter:str=None, save_csv_dir:str=None):
@@ -114,7 +114,7 @@ def DataFrame(tableID:str, name:str=None, limit:int=None, dataFilter:str=None, c
     if save_csv_dir is not None:
         df.to_csv(f"{save_csv_dir}/{tablename}.csv", index=False, single_file=True)
     df = df.compute()
-    delete_json_files()
+    # delete_json_files()
     return df
 
 def fullDataset(tableID:str, limit:int=None, dataFilter:str=None, customFilter:str=None):
