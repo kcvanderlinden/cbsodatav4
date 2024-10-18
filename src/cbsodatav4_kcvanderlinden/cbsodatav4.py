@@ -75,7 +75,7 @@ def getData(target_url:str, return_data = False):
         if not os.path.exists("./temporary_json"):
             os.makedirs("./temporary_json")
         # write every page to json is easier on the system memory and a little more demanding on the disk space
-        with open(f'./temporary_json/{hex_target_url}.json', 'w', encoding='utf-8') as f:
+        with open(os.path.join('./temporary_json/', f'{hex_target_url}.json'), 'w', encoding='utf-8') as f:
             json.dump(dicts, f, ensure_ascii=False, indent=4)
 
 def DataFrame(tableID:str, name:str=None, limit:int=None, dataFilter:str=None, customFilter:str=None, save_csv_dir:str=None):
@@ -143,7 +143,7 @@ def fullDataset(tableID:str, limit:int=None, dataFilter:str=None, customFilter:s
                     # Append each dataframe to the list and then use dask's `compute` method to combine them into a single dataframe
                     future.result()
                 except Exception as e:
-                    print(f"Error processing filter {i+1}: {e}")
+                    print(f"\nError processing filter {i+1}: {e}")
 
         df = dd.read_json(
             get_json_files(), 
@@ -297,7 +297,7 @@ def get_json_files():
     json_files = []
     for filename in os.listdir("./temporary_json"):
         if filename.endswith(".json"):
-            json_files.append(f'./temporary_json/{filename}')
+            json_files.append(os.path.join("./temporary_json", filename))
     return json_files
 
 def delete_json_files():
@@ -307,4 +307,4 @@ def delete_json_files():
     for filename in os.listdir("./temporary_json"):
         if filename.endswith(".json"):
             os.remove(os.path.join("./temporary_json", filename))
-    print("All .json files deleted from ./cache folder")
+    print("\nAll .json files deleted from ./cache folder")
