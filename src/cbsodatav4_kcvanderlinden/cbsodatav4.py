@@ -10,75 +10,10 @@ import dask.dataframe as dd
 import dask
 import random
 from time import sleep
-from dask.distributed import LocalCluster
-cluster = LocalCluster(processes=True, # notice this line
-                           n_workers=1,
-                           memory_limit="2 GiB")
 
 basic_odata_url = 'https://datasets.cbs.nl/odata/v1/CBS/'
 
-def cbsConnect(target_url:str):
-    '''
-    This function connects to the CBS API and returns a list of dictionaries.
-    target_url: str, the URL is the url that contains the data you want to retrieve
-    returns: list
-    '''
-    session = requests.Session()
-    retries = Retry(total=5, backoff_factor=1, status_forcelist=[ 500, 502, 503, 504 ])
-    session.mount('https://', HTTPAdapter(max_retries=retries))
-    retry_count = 0
-    data = []
-    time_out_time = 0
-    while True:
-        try:
-            response = session.get(target_url)
-            if response.status_code == 200:
-                data = response.json()  # Load the JSON data directly from the response object
-                return data
-            else:
-                raise requests.exceptions.RequestException(f"HTTP {response.status_code}")
-        except requests.exceptions.ChunkedEncodingError:
-            print(f"ChunkedEncodingError occurred (data load incomplete). Retrying...")
-            retry_count += 1
-            time_out_time += random.randrange(1, 10)/10 # dynamic time-out after unstable connection with host.
-            sleep(time_out_time)
-            if retry_count == 5:
-                raise requests.exceptions.ChunkedEncodingError("Max retries exceeded")
-        except json.JSONDecodeError as e:
-            print(f"JSON decode error: {e}. Retrying...")
-        else:
-            break
-
-def getData(target_url:str, return_data = False):
-    '''
-    Get the data from the target URL.
-    target_url: str, the URL to get the data from
-    tableLength: int, the number of rows in the table
-    '''
-    pages_read = 0
-    nextPage = True
-    dicts = []
-    hex_target_url = ''.join(format(ord(c), 'x') for c in target_url)[-20:]
-    while nextPage:
-        response = cbsConnect(target_url)
-        nextPage = True if "@odata.nextLink" in response else False
-        if not nextPage and pages_read == 0:
-            dicts += response['value']
-        else:
-            dicts += response['value']
-            pages_read += 1
-            nextPage = True if "@odata.nextLink" in response else False
-            target_url = response["@odata.nextLink"] if nextPage else target_url
-    if return_data:
-        return response['value']
-    else:
-        if not os.path.exists("./temporary_json"):
-            os.makedirs("./temporary_json")
-        # write every page to json is easier on the system memory and a little more demanding on the disk space
-        with open(os.path.join('./temporary_json/', f'{hex_target_url}.json'), 'w', encoding='utf-8') as f:
-            json.dump(dicts, f, ensure_ascii=False, indent=4)
-
-def DataFrame(tableID:str, name:str=None, limit:int=None, dataFilter:str=None, customFilter:str=None, save_csv_dir:str=None):
+def DataFrame(tableID:str, name:str=None, limit:int=None, dataFilter:str=None, save_csv_dir:str=None):
     """
     Return a Pandas DataFrame containing the data from the CBS OData API.
 
@@ -107,51 +42,120 @@ def DataFrame(tableID:str, name:str=None, limit:int=None, dataFilter:str=None, c
     tablename = tableName(tableID, name, dataFilter, limit)
 
     if name == None:
-        df = fullDataset(tableID, limit, dataFilter, customFilter)
+        df = fullDataset(tableID, limit, dataFilter)
     else:
-        df = specificTable(tableID, name, limit, dataFilter, customFilter)
+        df = specificTable(tableID, name, limit, dataFilter)
     # if cache is true, check if cache folder exists, otherwise create it
     if save_csv_dir is not None:
         df.to_csv(f"{save_csv_dir}/{tablename}.csv", index=False, single_file=True)
+        sys.stdout.write(f'\nsaved {tablename}')
     df = df.compute()
-    # delete_json_files()
+    delete_json_files()
     return df
 
-def fullDataset(tableID:str, limit:int=None, dataFilter:str=None, customFilter:str=None):
+def cbsConnect(target_url:str):
     '''
-    Get the full dataset of a table, including all codes
-    tableID: str, the table ID of the dataset
-    limit: int, the maximum number of rows to retrieve
-    dataFilter: str, the filter to apply to the data
+    This function connects to the CBS API and returns a list of dictionaries.
+    
+    Parameters
+    ----------
+    target_url : str
+        The URL of the data you want to retrieve.
+    Returns
+    -------
+    list
+        A list of dictionaries containing the retrieved data.
+    
+    Examples
+    --------
+    >>> cbsConnect('https://datasets.cbs.nl/odata/v1/CBS/$metadata')
     '''
-    if customFilter is not None:
-        typefilter = customFilter['type']
-        filtervalue = customFilter['filterValue']
-        df_type = specificTable(tableID, typefilter)
-        df_type = dd.from_pandas(pd.DataFrame(df_type), npartitions=1)
-        dataFilterValues = df_type.loc[df_type["Identifier"].str.contains(filtervalue), "Identifier"].values.compute()
-        
-        dataFilterlist = [f"RegioS eq '{val}'" for val in dataFilterValues]
-        sys.stdout.write(f'Totaal aantal soorten op basis van filter {len(dataFilterlist)}')
-        sys.stdout.write('\n')
-        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
-            futures = {executor.submit(getData, targetUrl(tableID, "Observations", limit, filter)): i for i, filter in enumerate(dataFilterlist)}
-            for i, future in enumerate(concurrent.futures.as_completed(futures)):
-                statusPrint(len(dataFilterlist), i)
-                try:
-                    
-                    # Append each dataframe to the list and then use dask's `compute` method to combine them into a single dataframe
-                    future.result()
-                except Exception as e:
-                    print(f"\nError processing filter {i+1}: {e}")
+    session = requests.Session()
+    retries = Retry(total=5, backoff_factor=1, status_forcelist=[ 500, 502, 503, 504 ])
+    session.mount('https://', HTTPAdapter(max_retries=retries))
+    retry_count = 0
+    data = []
+    time_out_time = 0
+    while True:
+        try:
+            response = session.get(target_url)
+            if response.status_code == 200:
+                data = response.json()  # Load the JSON data directly from the response object
+                return data
+            else:
+                raise requests.exceptions.RequestException(f"HTTP {response.status_code}")
+        except requests.exceptions.ChunkedEncodingError:
+            print(f"ChunkedEncodingError occurred (data load incomplete). Retrying...")
+            retry_count += 1
+            time_out_time += random.randrange(1, 10)/10 # dynamic time-out after unstable connection with host.
+            sleep(time_out_time)
+            if retry_count == 5:
+                raise requests.exceptions.ChunkedEncodingError("Max retries exceeded")
+        except json.JSONDecodeError as e:
+            print(f"JSON decode error: {e}. Retrying...")
+        else:
+            break
 
-        df = dd.read_json(
-            get_json_files(), 
-            blocksize=None, orient="records", 
-            lines=False
-            ) 
+def getData(target_url:str, return_data:bool = False):
+    '''
+    Get the data from the target URL.
+
+    Parameters
+    ----------
+    target_url : str
+        The URL to retrieve data from.
+    return_data : bool, optional
+        If True, return the retrieved data directly. Otherwise, return None (default is False).
+    
+    Returns
+    -------
+    dict or None
+        A dictionary containing the retrieved data if return_data=True; otherwise, None.
+    '''
+    hex_target_url = ''.join(format(ord(c), 'x') for c in target_url)[-20:]
+    response = cbsConnect(target_url)
+    if return_data:
+        return response['value']
     else:
-        df = getData(targetUrl(tableID, "Observations", limit, dataFilter))
+        writeJson(response['value'], hex_target_url)
+
+def fullDataset(tableID:str, limit:int=None, dataFilter:str=None):
+    """
+    Get the full dataset of a table, including all codes.
+
+    Parameters
+    ----------
+    tableID : str
+        The ID of the table to retrieve data from.
+    limit : int, optional
+        The maximum number of rows to retrieve, by default None.
+        If not specified, all rows will be retrieved.
+    dataFilter : str, optional
+        A filter to apply to the data, by default None.
+        If not specified, no filter will be applied.
+
+    Returns
+    -------
+    Pandas DataFrame
+        A DataFrame containing the retrieved data.
+    """
+    urlOfObservations = targetUrl(tableID, "Observations", limit, dataFilter)
+    numberOfObservationsUrl = f'{urlOfObservations}&$count=true&$top=0'
+    numberOfObservations = cbsConnect(numberOfObservationsUrl)['@odata.count']
+    listOfObservationUrls = listOfUrls(urlOfObservations, numberOfObservations)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+        futures = {executor.submit(getData, observationUrl): i for i, observationUrl in enumerate(listOfObservationUrls)}
+        for i, future in enumerate(concurrent.futures.as_completed(futures)):
+            statusPrint(numberOfPages(numberOfObservations), i)
+            try:
+                future.result()
+            except Exception as e:
+                print(f"\nError processing filter {i+1}: {e}")
+    df = dd.read_json(
+        get_json_files(), 
+        blocksize=None, orient="records", 
+        lines=False
+        )
 
     availableDimTables = [df['name'] for df in requests.get(f"{basic_odata_url}{tableID}").json()['value']]
     codeDimTables = [dtable for dtable in availableDimTables if dtable.endswith("Codes") and dtable not in ['RegioSCodes']]
@@ -203,30 +207,55 @@ def fullDataset(tableID:str, limit:int=None, dataFilter:str=None, customFilter:s
 
     # lowercase all columnnames
     df.columns  = [col.lower() for col in df.columns]
-
-    
-
     return df
 
 def specificTable(tableID:str, name:str, limit:int=None, dataFilter:str=None):
     '''
     Get a specific table from the dataset.
-    tableID: str, the table ID of the dataset
-    name: str, the name of the table to retrieve
-    limit: int, the maximum number of rows to retrieve
-    dataFilter: str, the filter to apply to the data
+    
+    Parameters
+    ----------
+    tableID : str
+        The ID of the table to retrieve.
+        
+    name : str
+        The name of the table to retrieve.
+        
+    limit : int, optional
+        The maximum number of rows to retrieve. Defaults to None.
+        
+    dataFilter : str, optional
+        The filter to apply to the data. Defaults to None.
+
+    Returns
+    ------
+    df : dask DataFrame
+        The retrieved table as a Dask DataFrame.
     '''
     if name != "/Observations":
         df = getData(targetUrl(tableID, name, limit, dataFilter), return_data=True)
     else:
-        df = getData(targetUrl(tableID, name, limit, dataFilter), return_data=True) # , tableLengthObservations(tableID))
+        df = getData(targetUrl(tableID, name, limit, dataFilter), return_data=True)
     return df
 
 def tableName(tableID:str, name:str, dataFilter:str, limit:int):
     '''
-    Create a tablename based on the dataFilter and tableID.
-    dataFilter: str, the filter to apply to the data
-    tableID: str, the table ID of the dataset
+    Create a tablename based on the table ID and data filter.
+    Parameters
+    ----------
+    tableID: str
+        The unique identifier of the dataset.
+    name: str
+        The name of the dimension or attribute to create a table for.
+    dataFilter: str
+        An optional filter to apply to the data.
+    limit: int
+        The maximum number of rows to retrieve.
+
+    Returns
+    -------
+    tablename: str
+        A unique identifier for the created table.
     '''
     tablename = f"{tableID}"
     if name!=None:
@@ -234,8 +263,8 @@ def tableName(tableID:str, name:str, dataFilter:str, limit:int):
     elif name==None:
         tablename += "_allTables"
     if dataFilter!=None:
-        filter_as_string = dataFilter.replace(" eq", "").replace("'", "").replace('"', "").replace(' ', '_').strip() # TODO as one regex
-        tablename += "_" + filter_as_string 
+        for k in dataFilter:
+            tablename += f"_{k}={dataFilter[k]}"
     if limit!=None:
         tablename += f"_limit={limit}"
     return tablename
@@ -243,28 +272,106 @@ def tableName(tableID:str, name:str, dataFilter:str, limit:int):
 def tableLengthObservations(tableID:str):
     '''
     Get the number of rows in the observations table.
-    tableID: str, the table ID of the dataset
+    
+    Parameters
+    ----------
+    tableID : str
+        The ID of the dataset.
+
+    Returns
+    -------
+    int
+        The number of rows in the observations table.
     '''
+    url = f"{basic_odata_url}{tableID}/Observations/$count"
+    response = cbsConnect(url)
+    return response['@odata.count']
     observationCount = requests.get(f"{basic_odata_url}{tableID}/Properties").json()['ObservationCount']
     return observationCount
 
 def targetUrl(tableID:str, name:str, limit:int=None, dataFilter:str=None):
-    '''
+    """
     Create the target URL for the API request.
-    tableID: str, the table ID of the dataset
-    name: str, the name of the table to retrieve
-    limit: int, the maximum number of rows to retrieve
-    dataFilter: str, the filter to apply to the data
-    '''
+    
+    Parameters
+   -----------
+    tableID : str
+        The ID of the table to retrieve.
+        
+    name : str
+        The name of the table to retrieve. If None, retrieves all tables.
+        
+    limit : int, optional
+        The maximum number of rows to retrieve (default=None).
+        
+    dataFilter : str, optional
+        A dictionary containing filter parameters (default=None).
+    
+    Returns
+   -----------
+    target_url : str
+        The constructed target URL for the API request.
+    """
     tableUrl = f"{basic_odata_url}{tableID}"
-    target_url = f"{tableUrl}/{name}"
+    target_url = f"{tableUrl}/{name}?"
     if limit != None:
         target_url += f"?$top={limit}"
         target_url += f"&" if dataFilter != None else ""
     if dataFilter != None:
-        target_url += f"?$filter={dataFilter}"
-
+        for i, k in enumerate(dataFilter):
+            target_url += f"$filter=" if i == 0 else "%20and%20"
+            target_url += f"contains({k},%27{dataFilter[k]}%27)"
     return target_url
+
+def numberOfPages(limit:int):
+    """
+    Calculate the number of pages required to process a large dataset.
+
+    Parameters:
+        limit (int): The maximum number of rows per page.
+
+    Returns:
+        int: The total number of pages.
+    """
+    pageEntryLimit = 100000
+    numberOfRequiredPages = -(-limit // pageEntryLimit)
+    return numberOfRequiredPages
+
+def listOfUrls(url:str, limit:int=None):
+    """
+    Generate a list of URLs for the given URL and optional limit.
+
+    Args:
+        url (str): The base URL.
+        limit (int, optional): The maximum number of rows to retrieve. Defaults to None.
+
+    Returns:
+        list: A list of URLs.
+    """
+    return [f'{url}&$skip={x*100000}' for x in range(numberOfPages(limit))]
+
+def writeJson(data:list, filename:str):
+    """
+    Write JSON data to a file.
+
+    Parameters
+    ----------
+    data : list
+        The data to be written as JSON.
+    filename : str
+        The name of the file where the JSON data will be written.
+
+    Returns
+    -------
+    None
+
+    Note: This function assumes that the input data is a Python list, and will write it to a file in the current working directory. If you want to write the file to a different location or have specific formatting requirements, this function may need to be modified.
+    """
+    if not os.path.exists("./temporary_json"):
+        os.makedirs("./temporary_json")
+    # write every page to json is easier on the system memory and a little more demanding on the disk space
+    with open(os.path.join('./temporary_json/', f'{filename}.json'), 'w', encoding='utf-8') as f:
+        json.dump(data, f, ensure_ascii=False, indent=4)
 
 def get_parents(row:str, df:dd):
     '''
@@ -284,6 +391,26 @@ def get_parents(row:str, df:dd):
     return '|'.join(parentTitles[::-1])
 
 def statusPrint(totalAmount:int, currentAmount:int):
+    """
+    Print a status message indicating the progress of processing a large dataset.
+
+    Parameters:
+        totalAmount (int): The total number of rows in the dataset.
+        currentAmount (int): The current number of rows being processed.
+
+    Returns:
+        None
+    """
+    """
+    This function prints a status message to indicate the progress of processing a large dataset.
+    
+    Parameters:
+        totalAmount (int): The total number of rows in the dataset.
+        currentAmount (int): The current number of rows being processed.
+
+    Returns:
+        None
+    """
     current_percentage = int((currentAmount +1) / totalAmount * 100)
     current_bar = int((currentAmount +1) / totalAmount * 10)
     sys.stdout.write('\r')
@@ -291,9 +418,16 @@ def statusPrint(totalAmount:int, currentAmount:int):
     sys.stdout.flush()
 
 def get_json_files():
-    '''
-    Get a list of all .json files in the ./cache folder.
-    '''
+    """
+    This function generates a list of JSON file names based on the provided data.
+    
+    Parameters:
+        None
+        
+    Returns:
+        list: A list of JSON file names.
+    """
+    
     json_files = []
     for filename in os.listdir("./temporary_json"):
         if filename.endswith(".json"):
@@ -301,9 +435,20 @@ def get_json_files():
     return json_files
 
 def delete_json_files():
-    '''
-    Delete all .json files in the ./cache folder.
-    '''
+    """
+    This function deletes all JSON files from the ./temporary_json directory.
+
+    Parameters:
+        None
+
+    Returns:
+        None
+    """
+if os.path.exists("./temporary_json"):
+    for file in os.listdir("./temporary_json"):
+        if file.endswith(".json"):
+            os.remove(os.path.join("./temporary_json", file))
+    
     for filename in os.listdir("./temporary_json"):
         if filename.endswith(".json"):
             os.remove(os.path.join("./temporary_json", filename))
