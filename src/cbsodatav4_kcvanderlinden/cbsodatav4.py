@@ -13,7 +13,7 @@ from time import sleep
 
 basic_odata_url = 'https://datasets.cbs.nl/odata/v1/CBS/'
 
-def DataFrame(tableID:str, name:str=None, limit:int=None, dataFilter:str=None, save_csv_dir:str=None):
+def DataFrame(tableID:str, name:str=None, limit:int=None, dataFilter:str=None, save_csv_path:str=None):
     """
     Return a Pandas DataFrame containing the data from the CBS OData API.
 
@@ -30,8 +30,8 @@ def DataFrame(tableID:str, name:str=None, limit:int=None, dataFilter:str=None, s
     dataFilter : str, optional
         A filter to apply to the data, by default None.
         If not specified, no filter will be applied.
-    save_csv_dir : str, optional
-        if not None, save the csv file to the specified directory.
+    save_csv_path : str, optional
+        if not None, save the csv file to the specified directory. Path must incude the filename.
 
     Returns
     -------
@@ -39,16 +39,14 @@ def DataFrame(tableID:str, name:str=None, limit:int=None, dataFilter:str=None, s
         A DataFrame containing the retrieved data.
     """
     
-    tablename = tableName(tableID, name, dataFilter, limit)
-
     if name == None:
         df = fullDataset(tableID, limit, dataFilter)
     else:
         df = specificTable(tableID, name, limit, dataFilter)
     # if cache is true, check if cache folder exists, otherwise create it
-    if save_csv_dir is not None:
-        df.to_csv(f"{save_csv_dir}/{tablename}.csv", index=False, single_file=True)
-        sys.stdout.write(f'\nsaved {tablename}')
+    if save_csv_path is not None:
+        df.to_csv(f"{save_csv_path}.csv", index=False, single_file=True)
+        sys.stdout.write(f'\nwritten table to csv')
     df = df.compute()
     delete_json_files()
     return df
@@ -74,7 +72,6 @@ def cbsConnect(target_url:str):
     retries = Retry(total=5, backoff_factor=1, status_forcelist=[ 500, 502, 503, 504 ])
     session.mount('https://', HTTPAdapter(max_retries=retries))
     retry_count = 0
-    data = []
     time_out_time = 0
     while True:
         try:
@@ -85,16 +82,14 @@ def cbsConnect(target_url:str):
             else:
                 raise requests.exceptions.RequestException(f"HTTP {response.status_code}")
         except requests.exceptions.ChunkedEncodingError:
-            print(f"ChunkedEncodingError occurred (data load incomplete). Retrying...")
+            sys.stdout.write(f"ChunkedEncodingError occurred (data load incomplete). Retrying...")
             retry_count += 1
             time_out_time += random.randrange(1, 10)/10 # dynamic time-out after unstable connection with host.
             sleep(time_out_time)
             if retry_count == 5:
                 raise requests.exceptions.ChunkedEncodingError("Max retries exceeded")
         except json.JSONDecodeError as e:
-            print(f"JSON decode error: {e}. Retrying...")
-        else:
-            break
+            sys.stdout.write(f"JSON decode error: {e}. Retrying...")
 
 def getData(target_url:str, return_data:bool = False):
     '''
@@ -150,7 +145,7 @@ def fullDataset(tableID:str, limit:int=None, dataFilter:str=None):
             try:
                 future.result()
             except Exception as e:
-                print(f"\nError processing filter {i+1}: {e}")
+                sys.stdout.write(f"\nError processing filter {i+1}: {e}")
     df = dd.read_json(
         get_json_files(), 
         blocksize=None, orient="records", 
@@ -158,7 +153,7 @@ def fullDataset(tableID:str, limit:int=None, dataFilter:str=None):
         )
 
     availableDimTables = [df['name'] for df in requests.get(f"{basic_odata_url}{tableID}").json()['value']]
-    codeDimTables = [dtable for dtable in availableDimTables if dtable.endswith("Codes") and dtable not in ['RegioSCodes']]
+    codeDimTables = [dtable for dtable in availableDimTables if dtable.endswith("Codes")]
     groupDimTables = [dtable for dtable in availableDimTables if dtable.endswith("Groups") and dtable not in ['PeriodenGroups', 'RegioSGroups']]
 
     for column in codeDimTables+groupDimTables:
@@ -196,7 +191,7 @@ def fullDataset(tableID:str, limit:int=None, dataFilter:str=None):
             df['RegioCode'] = df['WijkenEnBuurten']
         if column.lower().endswith("regioscodes"):
             df[column] = df[column.replace("Codes", "")].copy()
-    standardColumns =  ['Id','Value', 'ValueAttribute', 'StringValue','RegioS', 'Parents', 'GemeenteCode', 'RegioCode']
+    standardColumns =  ['Id','Value', 'ValueAttribute', 'StringValue','RegioSCodes', 'Parents', 'GemeenteCode', 'RegioCode']
     columnsToKeep = [col for col in df.columns if col in standardColumns]
     columnsToKeep += [col for col in df.columns if col.endswith('Title')]
     columnsToKeep += [col for col in df.columns if col.endswith('parents')]
@@ -237,57 +232,6 @@ def specificTable(tableID:str, name:str, limit:int=None, dataFilter:str=None):
     else:
         df = getData(targetUrl(tableID, name, limit, dataFilter), return_data=True)
     return df
-
-def tableName(tableID:str, name:str, dataFilter:str, limit:int):
-    '''
-    Create a tablename based on the table ID and data filter.
-    Parameters
-    ----------
-    tableID: str
-        The unique identifier of the dataset.
-    name: str
-        The name of the dimension or attribute to create a table for.
-    dataFilter: str
-        An optional filter to apply to the data.
-    limit: int
-        The maximum number of rows to retrieve.
-
-    Returns
-    -------
-    tablename: str
-        A unique identifier for the created table.
-    '''
-    tablename = f"{tableID}"
-    if name!=None:
-        tablename += f"_{name}"
-    elif name==None:
-        tablename += "_allTables"
-    if dataFilter!=None:
-        for k in dataFilter:
-            tablename += f"_{k}={dataFilter[k]}"
-    if limit!=None:
-        tablename += f"_limit={limit}"
-    return tablename
-
-def tableLengthObservations(tableID:str):
-    '''
-    Get the number of rows in the observations table.
-    
-    Parameters
-    ----------
-    tableID : str
-        The ID of the dataset.
-
-    Returns
-    -------
-    int
-        The number of rows in the observations table.
-    '''
-    url = f"{basic_odata_url}{tableID}/Observations/$count"
-    response = cbsConnect(url)
-    return response['@odata.count']
-    observationCount = requests.get(f"{basic_odata_url}{tableID}/Properties").json()['ObservationCount']
-    return observationCount
 
 def targetUrl(tableID:str, name:str, limit:int=None, dataFilter:str=None):
     """
@@ -350,29 +294,6 @@ def listOfUrls(url:str, limit:int=None):
     """
     return [f'{url}&$skip={x*100000}' for x in range(numberOfPages(limit))]
 
-def writeJson(data:list, filename:str):
-    """
-    Write JSON data to a file.
-
-    Parameters
-    ----------
-    data : list
-        The data to be written as JSON.
-    filename : str
-        The name of the file where the JSON data will be written.
-
-    Returns
-    -------
-    None
-
-    Note: This function assumes that the input data is a Python list, and will write it to a file in the current working directory. If you want to write the file to a different location or have specific formatting requirements, this function may need to be modified.
-    """
-    if not os.path.exists("./temporary_json"):
-        os.makedirs("./temporary_json")
-    # write every page to json is easier on the system memory and a little more demanding on the disk space
-    with open(os.path.join('./temporary_json/', f'{filename}.json'), 'w', encoding='utf-8') as f:
-        json.dump(data, f, ensure_ascii=False, indent=4)
-
 def get_parents(row:str, df:dd):
     '''
     this function returns the titles of all parents of a row in a dataframe.
@@ -416,6 +337,29 @@ def statusPrint(totalAmount:int, currentAmount:int):
     sys.stdout.write('\r')
     sys.stdout.write(f"[%-{10}s] %d%%" % ('='*(current_bar), current_percentage))
     sys.stdout.flush()
+
+def writeJson(data:list, filename:str):
+    """
+    Write JSON data to a file.
+
+    Parameters
+    ----------
+    data : list
+        The data to be written as JSON.
+    filename : str
+        The name of the file where the JSON data will be written.
+
+    Returns
+    -------
+    None
+
+    Note: This function assumes that the input data is a Python list, and will write it to a file in the current working directory. If you want to write the file to a different location or have specific formatting requirements, this function may need to be modified.
+    """
+    if not os.path.exists("./temporary_json"):
+        os.makedirs("./temporary_json")
+    # write every page to json is easier on the system memory and a little more demanding on the disk space
+    with open(os.path.join('./temporary_json/', f'{filename}.json'), 'w', encoding='utf-8') as f:
+        json.dump(data, f, ensure_ascii=False, indent=4)
 
 def get_json_files():
     """
