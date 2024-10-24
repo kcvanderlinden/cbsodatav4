@@ -444,12 +444,9 @@ def delete_json_files():
     Returns:
         None
     """
-if os.path.exists("./temporary_json"):
-    for file in os.listdir("./temporary_json"):
-        if file.endswith(".json"):
-            os.remove(os.path.join("./temporary_json", file))
-    
-    for filename in os.listdir("./temporary_json"):
-        if filename.endswith(".json"):
-            os.remove(os.path.join("./temporary_json", filename))
-    print("\nAll .json files deleted from ./cache folder")
+    if os.path.exists("./temporary_json"):    
+        for filename in os.listdir("./temporary_json"):
+            if filename.endswith(".json"):
+                os.remove(os.path.join("./temporary_json", filename))
+        # Remove the empty directory after deleting all files
+        os.rmdir("./temporary_json")
