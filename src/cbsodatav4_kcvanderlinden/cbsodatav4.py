@@ -137,6 +137,8 @@ def fullDataset(tableID:str, limit:int=None, dataFilter:str=None):
     urlOfObservations = targetUrl(tableID, "Observations", limit, dataFilter)
     numberOfObservationsUrl = f'{urlOfObservations}&$count=true&$top=0'
     numberOfObservations = cbsConnect(numberOfObservationsUrl)['@odata.count']
+    if numberOfObservations == 0:
+        raise Exception("The number of observations is equal to 0. Maybe a filter is incorrect.")
     listOfObservationUrls = listOfUrls(urlOfObservations, numberOfObservations)
     with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
         futures = {executor.submit(getData, observationUrl): i for i, observationUrl in enumerate(listOfObservationUrls)}
