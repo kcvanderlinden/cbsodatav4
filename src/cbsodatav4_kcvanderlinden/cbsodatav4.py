@@ -10,10 +10,12 @@ import dask.dataframe as dd
 import dask
 import random
 from time import sleep
+import pathlib
+import shutil
 
 basic_odata_url = 'https://datasets.cbs.nl/odata/v1/CBS/'
 
-def DataFrame(tableID:str, name:str=None, limit:int=None, dataFilter:str=None, save_csv_path:str=None):
+def DataFrame(tableID:str, name:str=None, limit:int=None, dataFilter:str=None, save_csv_path:pathlib.Path=None):
     """
     Return a Pandas DataFrame containing the data from the CBS OData API.
 
@@ -38,17 +40,18 @@ def DataFrame(tableID:str, name:str=None, limit:int=None, dataFilter:str=None, s
     Pandas DataFrame
         A DataFrame containing the retrieved data.
     """
-    
-    if name == None:
-        df = fullDataset(tableID, limit, dataFilter)
-    else:
-        df = specificTable(tableID, name, limit, dataFilter)
-    # if cache is true, check if cache folder exists, otherwise create it
-    if save_csv_path is not None:
-        df.to_csv(f"{save_csv_path}.csv", index=False, single_file=True)
-        sys.stdout.write(f'\nwritten table to csv')
-    df = df.compute()
-    delete_json_files()
+    try:
+        if name is None:
+            df = fullDataset(tableID, limit, dataFilter)
+        else:
+            df = specificTable(tableID, name, limit, dataFilter)
+        # if cache is true, check if cache folder exists, otherwise create it
+        if save_csv_path is not None:
+            df.to_csv(f"{save_csv_path}.csv", index=False, single_file=True)
+            sys.stdout.write(f'\nwritten table to csv')
+        df = df.compute()
+    finally:
+        delete_json_files()
     return df
 
 def cbsConnect(target_url:str):
@@ -390,9 +393,7 @@ def delete_json_files():
     Returns:
         None
     """
-    if os.path.exists("./temporary_json"):    
-        for filename in os.listdir("./temporary_json"):
-            if filename.endswith(".json"):
-                os.remove(os.path.join("./temporary_json", filename))
-        # Remove the empty directory after deleting all files
-        os.rmdir("./temporary_json")
+    if os.path.exists("./temporary_json"):
+        shutil.rmtree("./temporary_json")
+    else:
+        print("The directory './temporary_json' does not exist.")
