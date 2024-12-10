@@ -19,12 +19,12 @@ classifiers = [
 
 [dependencies]
 dependencies = [
-"pandas==2.2.2"
-, "requests==2.31.0"
-, "urllib3==2.2.1"
-, "dask== 2024.9.1"
-, "dask-expr==1.1.15"
-, "numpy==2.1.2"
+    "pandas ~=2.2.2",
+    "requests ~=2.31.0",
+    "urllib3 ~=2.2.1",
+    "dask ~=2024.9.1",
+    "dask-expr ~=1.1.15",
+    "numpy ~=2.1.2",
 ]
 
 [project.urls]
